@@ -462,9 +462,9 @@ done
 1.3.0 曾一度把 PKJ110 的该目录整目录合并，为的是携带一份合成出来的 OCS「config parse version 2」
 容器（`oplus_camera_feature_config`）—— 那是**错的方向**：实测证明这份容器会让相机在**进程内第一次
 取特性值时死锁**（ANR，主线程卡在 `CameraConfigure.getProjectSupportFeatureValue` 的
-`ConditionVariable.block()`，见 §4.10.5）。1.3.1 已把它、设备侧的 bind、以及生成它的
-`tools/build_feature_config_v2.py` 一并删除；调色盘开关改由
-`local.jiege.hook.x10.PaletteFeatureSwitch` 在 **Java 侧**回答 —— 见 §4.10.6。
+`ConditionVariable.block()`，见 §4.10.5）。1.3.2 保持删除它、设备侧的 bind、以及生成它的
+`tools/build_feature_config_v2.py`；调色盘开关**不再从任何地方补**——1.3.1 试过在 Java 侧回答
+`CameraConfig.d`，开关确实生效但相机随即原生崩溃，已撤回，见 §4.10.11/§4.10.12。
 两条路径都**不覆盖** `payload/` 里 PMA110 需要的那一套，也不动 PMA110 的原厂字节。
 
 **X8U 上不绑定**的项及原因：
@@ -1277,7 +1277,7 @@ python tools/verify_port_artifacts.py --skip-zip   # 重打包之前跑
 `camera_unit_config.broken.bak` 已从 `module/payload_pkj110/` 移到 `port-x8u/broken/`：
 它留在模块源码树里就迟早会被某次朴素打包带进模块。第 6 组检查会对任何 `.bak` 直接报错。
 
-当前状态（1.3.1）：**PASS: all checks green**（`OmniCam-Aura-1.3.1-KSU.zip`，54,318,879 B；
+当前状态（1.3.2）：**PASS: all checks green**（`OmniCam-Aura-1.3.2-KSU.zip`；
 包内含 `module/x8u-fix-pop.sh`、`module/x8u-fix-vibrant.sh` 等五个脚本，可脱离 PC 在设备上执行）。
 
 ### 4.9 POP 的「浓郁」滤镜没反应 —— X8U 的 ODM 里**整个 `positive_*` 色卡家族都不存在**
@@ -1419,10 +1419,22 @@ X8U 的 ODM 里有一个语义等价、**确实存在**的正片色卡：
 `POSITIVE_LUT_SIZE/POSITIVE_LUT_MD5` 定值与归档内校验，第 6 组加了
 `x8u-fix-vibrant.sh` 的 size/md5 定值；`tools/verify_aura.py` 也要求这 8 个名字在包里。
 
-### 4.10 X8U 的 X10 调色盘（Palette）：开关不在盘上，在进程里
+### 4.10 X8U 的 X10 调色盘（Palette）：开关不在盘上，在进程里 —— 而进程里也开不了
 
 （2026-10-13 晚，实机反馈：*"调色盘没有出现"*。本节取代 1.3.0 的结论 —— 那份结论**方向是错的**，
-并且会把相机锁死；最终修法在 §4.10.6。）
+并且会把相机锁死。）
+
+**最终结论（先看这个）**：三层错，逐层剥开，最后卡在 X8U 自己的原生件上。
+
+| # | 想法 | 结果 |
+|---|---|---|
+| 1 | 从盘上补一个 OCS「config parse version 2」容器把开关喂进去 | **错**：容器让相机在进程内第一次取特性值时死锁（ANR）——§4.10.4/§4.10.5 |
+| 2 | 在 Java 侧回答 `FeatureApi.getProjectSupportFeatureValue` 这一个 key | **死代码**：`oa.k.b == false`，该方法在 X8U 上从不被调用——§4.10.3/§4.10.10 |
+| 3 | 改钩 `CameraUnitUtils.getVendorTagConfig`（兜底链） | **零调用**：`CameraConfig.d` 自带 `ConcurrentHashMap` 缓存，兜底链每进程只跑一次——§4.10.10 |
+| 4 | 落点改到必经的 `CameraConfig.d` | **开关生效，但相机必崩**：`Lut3dDataManager.e` 走调色盘分支 → `libCombineLutJni.processV3` 读野指针，进程反复重启——§4.10.11 |
+
+所以 **1.3.2 不装这个钩子**：开关是原厂值 false，面板不出现，相机稳定（§4.10.12）。
+要真正做成，缺的是 X9U 那份能处理调色盘组合的 `/product/lib64/libCombineLut*.so`，见 §4.10.11。
 
 #### 4.10.1 症状与第一层判据
 
@@ -1465,10 +1477,24 @@ if (ProtobufConfigureHelper.getConfigParseVersion() != 1) {                // li
 return sVendorTagMap.get(key);                                             // line 325
 ```
 
-`isFeatureConfigureFileExist()` 看的是 `/odm/etc/camera/config/oplus_camera_feature_config`
-（`/apex/com.oplus.camera.aps` 存在则换 apex 路径；X8U 无该 apex）。**X8U 原厂没有这个文件** ⇒
-第 319 行直接 `return null`，**所有** `com.oplus.feature.*` 键都取不到值 ⇒ `paletteMode()` 恒 false ⇒
-`CombineLutHelper.init(..., "/odm/etc/camera/basictone/palette")` 永远不执行。
+真正的闸门是 **parse version**，不是文件存在性。两个辅助方法都在 `ProtobufConfigureHelper`
+的 `<clinit>` 里算好并缓存（公开的那个各自只有一条 `sget`，返回缓存字段）：
+
+```java
+featureConfigureFileExist() = isFileNotEmpty("camera_unit_feature_config.protobuf")   // v1 路径
+                           || isFileNotEmpty("oplus_camera_feature_config")           // v2 路径
+getParseVersion()           = isFileNotEmpty("oplus_camera_feature_config") ? 2 : 1
+```
+
+⚠️ **X8U 是有那份 v1 文件的**（`camera_unit_feature_config.protobuf`，正是本模块 bind 上去的那份），
+所以 `isFeatureConfigureFileExist()` 在 X8U 上返回 **true**，第 319 行**不会** `return null`。
+
+真正让取值失效的是：`sVendorTagMap` 只由 `CameraConfigure.generateVendorTagMap(byte[])` 填充，
+而**全工程唯一调用它的是 `decodeConfigFileVersion2()`** —— v1 的 `decodeConfigFileVersion1()`
+从不调它。v1 下这张表始终是空的 ⇒ `sVendorTagMap.get(key)` 对**所有** `com.oplus.feature.*` 都是
+null ⇒ `paletteMode()` 恒 false ⇒ `CombineLutHelper.init(..., "/odm/etc/camera/basictone/palette")`
+永远不执行。**效应与"缺容器"一致，但归因必须是 parse version**（用文件存在性判断会在 X8U 上判反，
+见 §4.10.9）。
 
 #### 4.10.4 第一版方案（已废弃）：合成 V2 容器
 
@@ -1528,6 +1554,13 @@ ANR: Input dispatching timed out (Application does not have a focused window)
 
 #### 4.10.6 最终方案：在 Java 侧回答这一个开关
 
+> **本节结论已被 §4.10.11 推翻。** 这里写的"在 Java 侧回答开关"确实把 `paletteMode()` 变成了
+> true，但实机证明它会**让相机在 basic tone 初始化时原生崩溃**，所以这段钩子**最终没有下发**。
+> 保留本节是为了留下"为什么当时这么想"和"错在哪"；当前的落盘状态见 §4.10.12。
+>
+> 另外本节代码里的钩子目标是 `FeatureApi.getProjectSupportFeatureValue`，那**在 X8U 上也是死代码**
+> （`oa.k.b == false`，见 §4.10.10），真正的落点是 `CameraConfig.d`。两处错在 §4.10.10/§4.10.11。
+
 新增 `local.jiege.hook.x10.PaletteFeatureSwitch`（由 `ModuleEntry` 装上）：
 
 ```java
@@ -1542,9 +1575,12 @@ XposedHelpers.findAndHookMethod(
 
 - 钩子**在 `CameraConfigure` 之前**拦截，那个条件变量**根本不会被碰到**。
 - 只回答调色盘这一个 key；其它 key 落到原路径，行为与原厂 v1 **逐字节相同**（一律 null）。
-- 装之前先探一次 `ProtobufConfigureHelper.isFeatureConfigureFileExist()`：**设备自带容器时直接让路**
-  （X10 那类机器已经能自己回答，且它们的 `initialize()` 时序本来就是对的）。探不到就按"没有容器"
-  处理 —— 那正是需要它的情形。
+- 装之前先探一次 `ProtobufConfigureHelper.getConfigParseVersion()`：**只在该值 ≠ 1 时让路**
+  （那说明盘上确实有 v2 容器，X10 那类机器能自己回答，且它们的 `initialize()` 时序本来就是对的）。
+  ⚠️ **不要改用 `isFeatureConfigureFileExist()` 做这个判断** —— 它在任何带 v1 配置文件的机器上
+  都返回 true（含 X8U），会把钩子在最需要它的地方跳过。这是 1.3.1 首版的实机 bug，见 §4.10.9。
+- 探不到（类缺失或调用抛异常）就按 v1 处理并照常装挂 —— 装挂只影响调色盘这一个 key，而漏装会让
+  面板一直不出现。
 - 色卡仍由模块 payload 提供（`palette/{HDR,SDR}/SC16Lut0..8` + 4 个 `SimTool_Palette_*.ini`），
   见 4.10.8。
 
@@ -1565,8 +1601,172 @@ XposedHelpers.findAndHookMethod(
 
 #### 4.10.8 回退
 
-停用模块后 `PaletteFeatureSwitch` 不装 ⇒ `paletteMode()` 回到原厂 false，调色盘面板消失，
-无残留副作用（配置文件目录从未被改动，容器从未落盘）。
+1.3.1 下发的 APK 里**没有**这段钩子（见 §4.10.11），所以 X8U 的调色盘开关就是原厂值 `false`，
+`paletteMode()` 恒为 false，面板不出现；配置文件目录从未被改动，容器从未落盘，`/odm` 全程只读。
+唯一留在设备上的是色卡（`palette/{HDR,SDR}/SC16Lut0..8` + 4 个 `SimTool_Palette_*.ini`），
+它们只是多出来的文件，没有开关指向它们，纯追加、可删。
+
+#### 4.10.9 实机踩坑：守卫一度用错方法，钩子在 X8U 上把自己跳过了
+
+（2026-10-14 07:1x，1.3.1 首版上机。日志只有一句：
+
+```
+X10Filter: palette switch: platform has its own config container, left alone
+```
+
+而设备上 `/odm/etc/camera/config/oplus_camera_feature_config` **并不存在**。原因是 1.3.1 首版拿
+`ProtobufConfigureHelper.isFeatureConfigureFileExist()` 当守卫，而这个方法：
+
+```java
+public static boolean isFeatureConfigureFileExist() {   // 只读缓存字段，不查盘
+    return sFeatureConfigureFileExist;                  // = featureConfigureFileExist()
+}
+private static boolean featureConfigureFileExist() {    // 真正判定
+    return isFileNotEmpty(V1_PATH) || isFileNotEmpty(V2_PATH);   // X8U 有 V1 ⇒ true
+}
+```
+
+X8U 有 v1 文件 `camera_unit_feature_config.protobuf`（本模块自己 bind 的那份）⇒ 守卫为 true ⇒
+连 `FeatureApi` 钩子都没装。**改用 `getConfigParseVersion()`（X8U 上是 1）** 后正常，见 §4.10.6。
+
+教训：判断"这台机器是不是 v2"要问 **parse version**，不能问"配置文件在不在" —— 后者对 v1 也为真。
+
+#### 4.10.10 第二层错：连"取值链"都不是活的 —— `CameraConfig.d` 自带缓存
+
+（2026-10-14 07:1x，把守卫改对之后。钩子装上了，但模式依旧报 false：
+
+```
+X10Filter: palette switch installed: com.oplus.feature.color.palette.support=true
+HighPixelEffects: mode answers key_support_palette = false
+```
+
+为了定位，当时在**两个**候选落点各挂了一个带计数的探针（`CameraUnitUtils.getVendorTagConfig`
+与 `FeatureApi.getProjectSupportFeatureValue`），重启相机后：
+
+```
+X10Filter: palette switch: vendor tag source com.oplus.ocs.camera.appinterface.adapter.CameraUnitUtils
+             loader=dalvik.system.PathClassLoader[DexPathList[[zip file ".../OplusCamera.apk"],...]]
+--- vendorTag(...) ---   （零输出）
+--- featureApi(...) ---  （零输出）
+```
+
+类能加载、钩子在场，但两个方法**一次都没被调用**。原因是 `CameraConfig.d` 的字节码第一段：
+
+```
+sget-object v0, CameraConfig.d:Ljava/util/concurrent/ConcurrentHashMap;
+invoke-virtual {v0, v2}, ConcurrentHashMap;.get(Object)Object
+check-cast v1, Boolean
+if-eqz v1, 000f          // 命中直接 return
+...  string "true"/"false" / Byte.parseByte(v) > 0  ...
+invoke-virtual {v0, v2, v4}, ConcurrentHashMap;.put(Object,Object)Object   // 算完写回
+```
+
+也就是说 **`w`→`b`→`y` 整条兜底链每个键、每个进程只跑一次**，之后 `d` 永远从自己的 `Boolean`
+缓存返回；`w` 还有第二层 `ConcurrentHashMap f`（String 缓存，`containsKey` 判定）。
+`Lut3dDataManager.f` 在进程早期就问过这个键（把 false 缓存了），所以后面再怎么查都不再走兜底。
+
+⇒ **落点只能是 `CameraConfig.d` 本身**——它是所有读者（含 `Lut3dDataManager.f`）必经的那一层，
+在它上面前置 `setResult(true)` 与缓存无关。已给 `assets/symbols.json` 加指纹：
+
+```json
+"CameraConfig.flag": { "kind": "method", "in": "com.oplus.camera.configure.CameraConfig",
+  "params": ["java.lang.String", "boolean", "boolean"], "ret": "boolean", "static": true }
+```
+
+实机命中唯一一项，日志自报落点：
+
+```
+X10Filter: palette switch installed: com.oplus.feature.color.palette.support = true at com.oplus.camera.configure.CameraConfig.d
+X10Filter: flag probe: com.oplus.camera.super.text.mode.support      ← 探针证明确实是这一层
+X10Filter: palette switch answered com.oplus.feature.color.palette.support = true
+```
+
+教训：**先确认目标方法真的被调用，再讨论它返回什么。** 反编译出"正确的值来源"不等于那是活路径；
+带计数的探针比再看三遍反汇编便宜。另外：`invokeOriginalMethod` 只跳过**该方法自己**的钩子，
+方法体里对别的方法的调用照走钩子 —— 所以 `HighPixelEffects.paletteConfigured()`
+（`invokeOriginalMethod(f, "common")`）能反映 `CameraConfig.d` 上的钩子。
+
+#### 4.10.11 开关生效了，然后相机必崩 —— 结论：X8U 上不能在 Java 层开
+
+（2026-10-14 07:3x。钩子上挂后 40 秒内相机必崩，之后进入崩溃循环。）
+
+```
+10-14 07:36:43 I/Zygote: Process 23662 exited due to signal 7 (Bus error)
+10-14 07:38:49 I/Zygote: Process 25650 exited due to signal 11 (Segmentation fault)
+10-14 07:39:10 I/Zygote: Process 26153 exited due to signal 11 (Segmentation fault)
+10-14 07:39:18 I/Zygote: Process 26754 exited due to signal 7 (Bus error)
+```
+
+tombstone（`/data/system/dropbox/system_app_native_crash@*.txt`，用
+`su -c cp` 到 `/data/local/tmp` 再 `adb pull`，**别 `adb shell cat`**）：
+
+```
+signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0000000000000020 (read)
+    #00 __memmove_aarch64_nt+592
+    #01 libCombineLutJni.so  Java_com_oplus_camera_combinelut_CombineLutJNI_processV3+380
+    #04 OplusCamera.apk (offset 0x2608000)  com.oplus.ocs.camera.CombineLutHelper.process+38
+    #06 OplusCamera.apk (offset 0x5e000)    com.oplus.camera.common.utils.Lut3dDataManager.e+696
+```
+
+**决定性的一步是把 `+696` 换算成 dex pc**：
+
+- `Lut3dDataManager.e(IILjava/lang/String;)Z` 的 `insns size: 545` 个 16-bit code unit
+  ⇒ 若 `+696` 是 code unit 偏移，则 696 > 545，落在方法外，不可能；
+  ⇒ 它只能是**字节**偏移，`696 / 2 = 348 = 0x15C`。
+- 而 `e` 在 `0x15C` 的指令恰好是（见 `e` 的汇编码）：
+
+```
+22a5f8: if-eqz v13, 0163          |0126:   ← v13 就是调色盘开关
+22a60a: aput-object v2, v1, v3    |012f:   m[5] = "1"
+22a61c: aput-object v2, v1, v3    |0138:   m[6] = "1"
+22a664: invoke-virtual/range {v13..v22},
+        CombineLutHelper.process:(IIIIFFF[Ljava/lang/String;[I)[F   |015c:   ← 崩溃点
+```
+
+  且 `v13` 在 `0x0064` 由 `invoke-static Lut3dDataManager.f:(Ljava/lang/String;)Z` 得来，
+  即**调色盘模式**。对照 `0x0163` 起的那条分支（调色盘关闭时走）：它只会调
+  `process(IIII[I)`（`0x0195`），**根本不会到 `0x15C`**。
+
+⇒ **能走到崩溃点，前提就是调色盘为开；而它变开只可能来自这个钩子**
+（原厂 X8U 的 `CameraConfig.d` 对该键返回 false，1.3.1 首版实机日志已证
+`mode answers key_support_palette = false`）。
+
+崩溃前的最后两行日志把现场钉死（同一次调用，间隔 0.11 秒）：
+
+```
+07:39:10.324 I/OCAM_Lut3dDataManager(26153): initializeBasicToneEnv, combineType: 1, capMode: 2 capModeName common
+07:39:10.330 E/OCAM_Lut3dDataManager(26153): initializeBasicToneEnv, init result 0, mPaletteFlag: false, mIsHDR: false
+07:39:10.442  SIGSEGV
+```
+
+`capModeName common` ⇒ 这次调用正是 `f("common") == true` 的那一支
+（`f` 的后半段就是 `"common".equals(scene) || "portrait" || "night"`）。
+`init result 0` 说明 `CombineLutHelper.init()` 是成功的，**崩在它后面的 `process`**。
+
+**所以：`CameraConfig.d` 钩子撤掉，1.3.1/1.3.2 都不下发它。**
+需要强调的是崩的不是 Java 层——`processV3` 是 X8U 自己的 `/product/lib64/libCombineLutJni.so`，
+与相机 APK 同分区；它处理不了调色盘组合。**要真正做成，缺的是 X9U 那份能处理调色盘的原生件
+（`libCombineLut.so` / `libCombineLutJni.so`），而它不在这份移植素材里**——和 §4.9 的
+`positive_*` 色卡缺口属于同一类问题：开关背后得有设备侧既有实现。
+
+**顺带记一笔"为什么不做半成品"**：可以让 `HighPixelMode.getSupportFunction("key_support_palette")`
+单独返回 true，面板就会出现（不动 `CameraConfig.d`），但 `Lut3dDataManager.f` 仍是 false
+⇒ 调色盘 LUT 不会被合成，选色**没有任何效果**。面板"显示但无效"比不显示更糟，故不做。
+
+#### 4.10.12 落盘状态（1.3.2）
+
+| | 状态 |
+|---|---|
+| `CameraConfig.d` 钩子 / `PaletteFeatureSwitch.java` | **已删除**（连 `ModuleEntry` 的装挂、`symbols.json` 的 `CameraConfig.flag` 指纹一起） |
+| 色卡 `palette/{HDR,SDR}/SC16Lut0..8` + 4 个 `SimTool_Palette_*.ini` | **仍随包下发**（纯追加、无开关指向、可删） |
+| `payload_pkj110/oplus_camera_feature_config` | 不存在（V2 容器，历史上会死锁） |
+| 配置文件目录合并 | 不做，两机型都逐文件 `bind_file` |
+| `/odm` | 全程只读 |
+| 撤回后的实机验证 | 重装 APK + 重启相机，稳定观察期内 **0 次原生崩溃**，模块各钩子正常上挂 |
+
+要重开这个话题，起点是：`symbols.json` 加回上面那个 `CameraConfig.flag` 指纹 → 钩 `CameraConfig.d`
+（只对 `com.oplus.feature.color.palette.support` 返回 `Boolean.TRUE`）→ **先准备好 X9U 的
+`libCombineLut*.so`**，否则只会重现这次的崩溃。
 
 ---
 
@@ -1670,16 +1870,16 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 - [ ] ISP GR 调谐（`com.qti.tuned.zf*.bin`）与 gamma 表的 X8U 版本 —— 需要厂商调优工具，本工程无法生成。
 - [ ] `oplus_camera_config` / `algo_switch_config` / `aps_config` / 两个 `*_decision*.json` 的
       解密与 GR 化（X8U 盘上为加密二进制）。
-- [x] ~~X10 调色盘（依赖 `libBasicTonePhotoX9/X10.so` 后端）在 X8U 上默认不可用。~~
-      —— **已定位并修复（§4.10）**。调色盘**不依赖** `libBasicTonePhotoX9/X10.so`：缺的是
-      `com.oplus.feature.color.palette.support` 这个特性值（X8U 原厂为 OCS「config parse version 1」，
-      `getProjectSupportFeatureValue()` 对所有 `com.oplus.feature.*` 返回 null ⇒ `paletteMode()` 恒 false）。
-      **踩坑**：1.3.0 曾用设备自己的 FeatureTable 合成「config parse version 2」容器
-      `oplus_camera_feature_config` 去补这个值 —— 实测**把相机锁死**（主线程卡在
-      `CameraConfigure.getProjectSupportFeatureValue` 的 `ConditionVariable.block()`，见 §4.10.5）。
-      1.3.1 改为**在 Java 侧** hook `FeatureApi.getProjectSupportFeatureValue`，只对这一个 key
-      返回 `"true"`，**完全不落容器、不碰条件变量**（§4.10.6）；X10 的 `palette/{HDR,SDR}` 色卡
-      + 4 个 `SimTool_Palette_*.ini` 继续 merge。**面板 UI 与成片效果仍待上机逐项确认。**
+- [ ] **X10 调色盘：Java 层开不了，卡在 X8U 自己的原生 LUT 合成器**（§4.10）。
+      1.3.0 的容器方案会把相机锁死（主线程 `ConditionVariable.block()`，§4.10.5）；
+      1.3.1 改用 Java 侧回答 `com.oplus.feature.color.palette.support`（落点是 `CameraConfig.d`，
+      不是 `FeatureApi`，见 §4.10.10），**开关确实生效**（`paletteMode()` 变 true），
+      但相机随即在 `Lut3dDataManager.e` 走调色盘分支时**原生崩溃**：
+      `processV3` 读野指针（`libCombineLutJni.so`），反复重启（§4.10.11）。
+      1.3.2 已撤回该钩子；X10 的 `palette/{HDR,SDR}` 色卡 + 4 个 `SimTool_Palette_*.ini` 继续 merge。
+      要真正做成，**前置条件是拿到 X9U（PMA110）那份能处理调色盘组合的
+      `/product/lib64/libCombineLut.so` + `libCombineLutJni.so`**，本工程素材里没有。
+      把面板单独显示出来（不动 `CameraConfig.d`）是可行的，但选色不会有任何效果，故不做。
 - [ ] `libmsnativefilter.so` 是否要替换（模块 10.96 MB vs 设备 7.99 MB）——默认不换。
 - [ ] 实机验证 `frame+0x18` / `object+0x008` 两处写操作（静态一致，但仍属高风险写）。
 - [ ] `Zoom.labelBitmaps` 用的是类型级多命中，若后续机型把非缓存 Bitmap 也放进 `ZoomSeekBar`，
@@ -1768,7 +1968,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 ### 8.1 仓库内（离线，随包交付）
 
 ```
-tools/verify_aura.py             模块布局硬断言 + 打包一致性（原有）；含"未重落 parse-version-2 容器 + 调色盘钩子在场"反断言
+tools/verify_aura.py             模块布局硬断言 + 打包一致性（原有）；含"未重落 parse-version-2 容器 + 调色盘开关不得装挂"反断言
 tools/verify_port_artifacts.py   发布闸门：md5 定值 / payload 镜像 / JSON 形状 / 语义 diff / 原生指纹 / zip 内容
 tools/verify_payload_json.py     pair-list 变形检测（扫描 module/payload* + port-x8u/payload）
 tools/zip_module.py              打包 module/ → OmniCam-Aura-<ver>-KSU.zip

@@ -1,4 +1,4 @@
-# OmniCam Aura 1.3.1
+# OmniCam Aura 1.3.2
 
 ## 适用组合
 
@@ -13,7 +13,7 @@
 模块启动时会自行判定机型，同一个包可直接在两台设备上使用，判断结果显示在模块目录下的
 `mount.log` 与 `bind.log` 里（`profile=PMA110` 或 `profile=PKJ110`）。
 
-安装此 KernelSU 模块后，安装同版配套 APK `omnicam-aura-1.3.1.apk`，在 LSPosed 中启用并勾选相机
+安装此 KernelSU 模块后，安装同版配套 APK `omnicam-aura-1.3.2.apk`，在 LSPosed 中启用并勾选相机
 `com.oplus.camera` 和相册 `com.coloros.gallery3d`，然后重启。Aura 与 Muse 只能启用其一。
 
 ## 两个机型档案的差别
@@ -25,12 +25,15 @@
 - **PKJ110**：不改任何后端库（"只 hook"路线）。PKJ110 没有 `X9/X10` 后端，其
   `/odm/lib64/libBasicTonePhoto.so` 就是真实后端，而 OmniCam 那份是只负责 dlopen 的 8 KB 路由桩，
   挂上去会让 BasicTone 直接失败。配置文件改从 `payload_pkj110/` 取（两份按 PKJ110 原厂数据重新
-  生成的 GR 条目）。调色盘开关 `com.oplus.feature.color.palette.support` 由 APK 侧的
-  `local.jiege.hook.x10.PaletteFeatureSwitch` 在 **Java 层**回答 —— X8U 的 OCS 是"config parse
-  version 1"，`CameraConfigure.getProjectSupportFeatureValue()` 对 `com.oplus.feature.*` 一律返回
-  null，钩子只补这一个 key。**切勿**再从盘上放 `oplus_camera_feature_config`（V2 容器）：那会把
-  取值路径切到"等待一个尚未打开的条件变量"，进程内首次取特性值即死锁（详见 `port-x8u/README.md`
-  §4.10）。ISP 与 gamma 因属逐传感器数据而**不下发**；
+  生成的 GR 条目）。调色盘开关 `com.oplus.feature.color.palette.support` **目前不开**：X8U 的 OCS 是
+  "config parse version 1"，`CameraConfigure.getProjectSupportFeatureValue()` 对
+  `com.oplus.feature.*` 一律返回 null（`sVendorTagMap` 只由 v2 解码器填充），1.3.1 试过在 Java 层
+  回答这一个 key —— **开关确实生效，但相机随即在 basic tone 初始化时原生崩溃**
+  （`Lut3dDataManager.e` 的调色盘分支 → `libCombineLutJni.processV3` 读野指针），因此 1.3.2 撤回了
+  这个钩子。要真正做成，缺的是 X8U `/product/lib64` 的 `libCombineLut.so` / `libCombineLutJni.so`
+  能处理调色盘组合的版本。**切勿**再从盘上放 `oplus_camera_feature_config`（V2 容器）：那会把取值
+  路径切到"等待一个尚未打开的条件变量"，进程内首次取特性值即死锁（详见 `port-x8u/README.md`
+  §4.10，崩溃证据见 §4.10.11）。ISP 与 gamma 因属逐传感器数据而 **不下发**；
   `x10_basictone/` **只 merge 调色盘那一半**（`palette/{HDR,SDR}` 共 18 张色卡 +
   4 个 `SimTool_Palette_*.ini`），逐机型的 `lmt/` tone 表保持 X8U 原厂；专业视频 ISZ 补丁**跳过**
   （它逐字节匹配 PMA110 的 `CameraHWConfiguration.config`，且未在 X8U 上验证过）。

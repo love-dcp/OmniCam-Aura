@@ -1,21 +1,51 @@
-# OmniCam Aura 1.3.1
+# OmniCam Aura 1.3.2
 
 无界面相机模块。在既有的 Find X9 Ultra（PMA110，相机 7.006.77）与 Find X8 Ultra
-（PKJ110，相机 7.006.94 / 实机 7.006.123）支持之上，**1.3.1 修复 X8U 的 X10 调色盘（Palette）**，
-两台设备共用同一个包，机型开机自动判定。
+（PKJ110，相机 7.006.94 / 实机 7.006.123）支持之上，**1.3.2 撤回 X8U 的调色盘开关**：
+在 Java 侧回答那个特性开关确实能让 `paletteMode()` 变成 true，但相机随即在 basic tone 初始化时
+**原生崩溃**，实机不可用。原因在 X8U 自己的原生 LUT 合成器，不在 Java 层。详见下面「1.3.1/1.3.2」段。
 
-## 本次新增（1.3.1 · PKJ110 调色盘）
+## 本次变更（1.3.2 · PKJ110 调色盘开关撤回）
 
-- **X8U 调色盘可用**。根因是 X8U 取不到特性开关
-  `com.oplus.feature.color.palette.support`：X8U 的 ODM 是 OCS「config parse version 1」，
-  `CameraConfigure.getProjectSupportFeatureValue()` 在 v1 下对**所有** `com.oplus.feature.*`
-  键返回 null，于是 `Lut3dDataManager.paletteMode()` 恒为 false，`CombineLutHelper.init()`
-  永远走不到 `/odm/etc/camera/basictone/palette/*`。既不是缺后端库，也不是 LSPosed 钩子没装。
-- **修复方式：在 Java 侧回答这一个开关**。新增 `local.jiege.hook.x10.PaletteFeatureSwitch`
-  （由 `ModuleEntry` 在相机进程里装上），前置 hook `FeatureApi.getProjectSupportFeatureValue`，
-  只对 `com.oplus.feature.color.palette.support` 返回 `"true"`；其它 key 落到原路径，
-  与原厂 v1 行为逐字节相同。装挂前先探 `ProtobufConfigureHelper.isFeatureConfigureFileExist()`，
-  设备若自带配置容器则主动让路。
+- **结论：X10 调色盘不能在 Java 层开启**。1.3.1 的钩子（hook `CameraConfig.d`，只回答
+  `com.oplus.feature.color.palette.support`）实测生效——设备日志
+  `X10Filter: palette switch answered com.oplus.feature.color.palette.support = true`，
+  `Lut3dDataManager.f("common")` 随之返回 true。**但相机随后必崩**：
+  `SIGSEGV`/`SIGBUS`，`libCombineLutJni.so Java_..._processV3` 读野指针，进程反复重启。
+- **决定性证据（dex 级）**：`Lut3dDataManager.e(scene)` 里
+  `v13 = f(scene)`（0x0064），`if-eqz v13, 0x0163`（0x0126）——**调色盘关闭走 0x0163 那条安全分支**
+  （只会调 `process(IIII[I)`），开启才落到 `0x015c: CombineLutHelper.process(IIIIFFF String[] int[])`。
+  tombstone 里的 `Lut3dDataManager.e+696` = 字节偏移 696 = 348 code unit = **0x15C**（该方法总共只有
+  545 unit，所以 `+N` 只能是字节）；崩溃现场的
+  `OCAM_Lut3dDataManager: initializeBasicToneEnv, combineType: 1, capMode: 2 capModeName common`
+  也正好是 `f("common") == true` 的那一次调用。⇒ **走到崩溃点必须调色盘为开，而它变开只因这个钩子。**
+- **修复方式：不装这个钩子**。删掉 `local.jiege.hook.x10.PaletteFeatureSwitch`、`ModuleEntry` 的装挂、
+  以及符号表里的 `CameraConfig.flag` 指纹；`tools/verify_aura.py` 反过来断言"它不得再被装挂"。
+  色卡（`palette/{HDR,SDR}/SC16Lut0..8` 共 18 张 + 4 个 `SimTool_Palette_*.ini`）**仍然随包下发**：
+  纯追加、无开关指向它们、可删。
+- **要真正做成，缺的是 X8U 的原生件**：`/product/lib64/libCombineLut.so` +
+  `/product/lib64/libCombineLutJni.so`（与相机 APK 同分区）。X8U 这份 `processV3` 处理不了调色盘
+  组合，而 X9U 的对应件不在这份移植素材里。这与 §4.9 的 `positive_*` 色卡缺口是同一类问题：
+  功能开关背后需要设备侧既有实现，不是多一个 flag。
+- **为什么不退而求其次**：把 `getSupportFunction("key_support_palette")` 单独改成 true，面板会出现，
+  但 `Lut3dDataManager.f` 仍为 false ⇒ 调色盘 LUT 根本不会被合成，选色**毫无效果**。
+  面板"显示但无效"比不显示更糟，因此不做。
+
+## 历史（1.3.1 · 已被 1.3.2 推翻）
+
+> **本节结论已被 1.3.2 推翻。** 1.3.1 的代码会让相机原生崩溃，**从未发布**（未推送远端）。
+> 保留是为了记录"当时为什么这么想"。
+
+- 根因判断（**这一层是对的**）：X8U 取不到 `com.oplus.feature.color.palette.support`，因为 X8U 的 ODM
+  是 OCS「config parse version 1」，`CameraConfigure.getProjectSupportFeatureValue()` 在 v1 下对
+  **所有** `com.oplus.feature.*` 键返回 null。
+- 但真正的闸门比"取值链"更深两层，1.3.1 首版两处都踩了：
+  1. `CameraConfig.y` 里 `oa.k.b ? FeatureApi.getProjectSupportFeatureValue(key) : null` ——
+     `oa.k.b` = "盘上有没有 v2 容器 `oplus_camera_feature_config`"，X8U 没有 ⇒ **FeatureApi 从来没被调用过**，
+     钩它是死代码；
+  2. `CameraConfig.d` **自带 `ConcurrentHashMap` 缓存**，每个键只算一次，之后直接 return ⇒
+     `w/b/y` 整条兜底链（含 `CameraUnitUtils.getVendorTagConfig`）**每次进程只跑一次**，
+     钩兜底链在实机上"零调用"。落点只能是 `CameraConfig.d` 本身。
 - **踩坑记录（务必不要重犯）**：1.3.0 曾用设备自己的 FeatureTable 合成一份 OCS「config parse
   version 2」容器 `oplus_camera_feature_config`，试图从盘上补这个开关。**实测直接把相机锁死**：
   `getProjectSupportFeatureValue()` 在 `parseVersion != 1` 时会
@@ -23,14 +53,14 @@
   打开、且该 `initialize()` 是"晚"调用的；进程内第一次取特性值发生得更早
   （`MasterPresetDeferredImportProvider.onCreate`，`installContentProviders` 阶段，
   **早于** `Application.onCreate()`）⇒ 有人等、没人唤醒，主线程 ANR。原厂 X8U 永远撞不到，
-  因为它在 `!isFeatureConfigureFileExist()` 那一步就 `return null` 了。1.3.1 已删除该容器、
-  设备侧的整目录合并、以及生成它的 `tools/build_feature_config_v2.py`，并让
-  `tools/verify_aura.py` 反向断言"容器不得重现、调色盘钩子必须在场"。
-- **X8U 只合并 `x10_basictone/` 的调色盘那一半**：`palette/{HDR,SDR}/SC16Lut0..8` 共 18 张
-  色卡 + 4 个 `SimTool_Palette_*.ini`；`lmt/`（逐机型 tone 表）保持 X8U 原厂不下发。
-  纯追加、可回退。
-- **配置目录不再合并**：两个机型都**逐文件** `bind_file` 那两份配置，
-  `/odm/etc/camera/config` 不做整目录合并（1.3.0 的合并只为携带那份容器，容器既废，合并也撤）。
+  因为它在 `!isFeatureConfigureFileExist()` 那一步就 `return null` 了。1.3.2 保持删除该容器、
+  设备侧的整目录合并、以及生成它的 `tools/build_feature_config_v2.py`。
+- 另一个只值一行字的坑：判断"这台机器是不是 v2"要问 **`getConfigParseVersion()`**，
+  不能问 `isFeatureConfigureFileExist()` —— 后者只读缓存字段，在**任何**带 v1 配置文件的机器上
+  都为 true（含 X8U），会把钩子在最需要它的地方跳过。
+- 1.3.1 附带并保留到 1.3.2 的两条：X8U 只合并 `x10_basictone/` 的调色盘那一半
+  （`palette/{HDR,SDR}/SC16Lut0..8` + 4 个 `SimTool_Palette_*.ini`，`lmt/` 不下发）；
+  两个机型都**逐文件** `bind_file` 配置，`/odm/etc/camera/config` 不做整目录合并。
 
 ## 本次新增（1.2.0 · PKJ110）
 
@@ -75,8 +105,10 @@
 - 已验证（PKJ110）：模块与 APK 已实机安装；相机正常启动并稳定运行；**POP 模式可用，切到 POP
   不再闪退，POP 的全部滤镜（含此前失效的「浓郁」）均生效**；GR 的符号层与原生 `getSettingInt`
   指纹已按设备上的 `libAlgoInterface.so` 复核一致；**1.3.0 的 V2 容器方案被实机证伪并已回滚**
-  （叠加容器后相机主线程 ANR，见上「踩坑记录」）。
-- 待验证 / 已知限制：X8U 上的移轴、滑杆与前置成片尚未逐项走查；X8U 的 X10 调色盘**已改为
-  Java 侧回答开关（1.3.1）并随包下发色卡**，但**面板 UI 与成片效果仍需上机逐项确认**；
-  X8U 的 ISP GR 调谐与 gamma 表（厂商调优工具才能生成）不在此次范围内；Pro video
+  （叠加容器后相机主线程 ANR，见上「踩坑记录」）；**1.3.1 的调色盘开关被实机证伪并已回滚**
+  （开关生效即原生崩溃，见上「1.3.2」段），撤回后重装实测 **0 次原生崩溃**。
+- 待验证 / 已知限制：X8U 上的移轴、滑杆与前置成片尚未逐项走查；**X8U 的 X10 调色盘目前不可用**
+  ——Java 层能开、但 X8U 自己的原生 LUT 合成器处理不了调色盘组合，缺的是 `/product/lib64` 那两个
+  原生件（X9U 的对应件不在移植素材里）。把面板单独显示出来是可以的，但选色不会有任何效果，
+  故不做。X8U 的 ISP GR 调谐与 gamma 表（厂商调优工具才能生成）不在此次范围内；Pro video
   ISZ 故意未在 X8U 上启用。完整的未决清单见 `port-x8u/README.md` 第 7 节。

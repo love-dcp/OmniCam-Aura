@@ -74,24 +74,22 @@ with ZipFile(ARCHIVE) as bundle, ZipFile(APK) as apk:
                  'positive_normal.bin', 'positive_master.bin',
                  'positive_hdr_master_a_1.bin', 'positive_hdr_master_d_1.bin'):
         require('payload/meishe_lut/' + name in names, f'Missing LUT: {name}')
-    # Palette (OCS "config parse version 2"). On version 1 -- the only version X8U's ODM ships --
-    # CameraConfigure.getProjectSupportFeatureValue() returns null for *every* com.oplus.feature.*
-    # key, so Lut3dDataManager.paletteMode() ("com.oplus.feature.color.palette.support") is
-    # permanently false and the whole palette stack stays dark even though it is present in the
-    # APK and already hooked. Shipping a synthesised version-2 container was tried and reverted:
-    # it deadlocks the camera on the process's very first feature lookup (see
-    # PaletteFeatureSwitch), so the switch is answered in Java and only the colour cards ship.
+    # Palette (OCS feature config). Two traps, both learned on device. On version 1 -- the only
+    # version X8U's ODM ships -- CameraConfig.y gates the FeatureApi call on oa.k.b, which means
+    # "does oplus_camera_feature_config exist"; it does not, so FeatureApi is never asked. And the
+    # w/b/y fallback itself runs once per key, ever: CameraConfig.d caches the answer in its own
+    # ConcurrentHashMap and returns from there on every later call.
+    #
+    # Answering the key in Java (hooking CameraConfig.d) does make Lut3dDataManager.paletteMode()
+    # true -- measured on device -- but it then hard-crashes the camera: Lut3dDataManager.e takes
+    # its palette branch (+0x15c) and the X8U native combiner (libCombineLutJni.processV3) dies on
+    # a bad pointer. So the switch is NOT shipped; only the colour cards are. See README 4.10.10.
     require('payload_pkj110/camera_unit_feature_config.protobuf' in names,
             'PKJ110 source FeatureTable missing')
     require('payload_pkj110/oplus_camera_feature_config' not in names,
             'PKJ110 ships the config parse version 2 container again: it deadlocks the camera')
-    switch = PROJECT / 'app/src/main/java/local/jiege/hook/x10/PaletteFeatureSwitch.java'
-    require(switch.is_file(), 'PaletteFeatureSwitch.java is gone: the palette switch has no supplier')
-    hook = switch.read_text(encoding='utf-8')
-    require('com.oplus.feature.color.palette.support' in hook and 'getProjectSupportFeatureValue' in hook,
-            'PaletteFeatureSwitch no longer answers the palette feature key')
-    require('PaletteFeatureSwitch.installCamera' in (PROJECT / 'app/src/main/java/local/omnicam/aura/ModuleEntry.java').read_text(encoding='utf-8'),
-            'PaletteFeatureSwitch is not installed from ModuleEntry')
+    require('PaletteFeatureSwitch' not in (PROJECT / 'app/src/main/java/local/omnicam/aura/ModuleEntry.java').read_text(encoding='utf-8'),
+            'the palette switch is installed again: it crashes the X8U camera on basic-tone init')
     for prefix in ('payload/x10_basictone/palette/HDR/SC16Lut', 'payload/x10_basictone/palette/SDR/SC16Lut'):
         for index in range(9):
             require(f'{prefix}{index}' in names, f'Palette colour card missing: {prefix}{index}')
@@ -135,10 +133,11 @@ require('elif [ "$PROFILE" != PMA110 ]; then' in hwcfg,
         'Pro video ISZ is no longer gated away from the PKJ110 profile')
 for name in ('PROFILE=$(detect_profile)', 'CONFIG_SRC=$MODDIR/payload_pkj110'):
     require(name in hwcfg, f'PKJ110 profile selection missing from post-fs-data.sh: {name}')
-# The palette switch is answered in Java (PaletteFeatureSwitch), so the config directory must NOT
-# be merged any more: merging it was how the synthesised version-2 container got in, which
-# deadlocks the camera. The colour cards are still merged into basictone -- assert both halves so a
-# regression cannot silently bring the container back or drop the cards.
+# The palette switch is deliberately NOT shipped: answering it in Java makes paletteMode() true but
+# then hard-crashes the camera on basic-tone init (README 4.10.10). So the config directory must NOT
+# be merged either -- merging it was how the synthesised version-2 container got in, which deadlocks
+# the camera. The colour cards are still merged into basictone -- assert both halves so a regression
+# cannot silently bring the container back or drop the cards.
 require('bind_merged_dir /odm/etc/camera/config "$CONFIG_EXTRA"' not in hwcfg,
         'PKJ110 config directory is merged again: the version-2 container deadlocks the camera')
 require('x10_basictone/palette' in hwcfg and 'SimTool_Palette_' in hwcfg,
@@ -151,4 +150,4 @@ for lib in ('libAlgoInterface.so', 'libBasicTonePhoto.so', 'libmsnativefilter.so
     require(f'"$MODDIR/payload/lib64/{lib}"' in mount,
             f'PMA110 backend bind lost: {lib}')
 subprocess.run(['cmd', '/c', str(BUILD_TOOLS / 'apksigner.bat'), 'verify', str(APK)], check=True)
-print('PASS: signed headless Aura APK; camera/gallery scope; GR/POP backends and all six palette capture nodes present; two device profiles wired; pro video ISZ present and PMA110-gated; PKJ110 palette switch in Java + colour cards packaged')
+print('PASS: signed headless Aura APK; camera/gallery scope; GR/POP backends and all six palette capture nodes present; two device profiles wired; pro video ISZ present and PMA110-gated; PKJ110 palette colour cards packaged, palette switch left off (it crashes the camera)')

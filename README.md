@@ -26,11 +26,11 @@ APK 没有 Activity、启动入口或设置界面，功能固定启用。
 
 | | PMA110（Find X9 Ultra） | PKJ110（Find X8 Ultra） |
 |---|---|---|
-| 配置来源 | `payload/`，完整配置集 | `payload_pkj110/`，两份按 X8U 原厂数据重新生成的配置；调色盘开关由 APK 在 Java 层补（见下） |
+| 配置来源 | `payload/`，完整配置集 | `payload_pkj110/`，两份按 X8U 原厂数据重新生成的配置；调色盘开关**不开**（Java 层能开但相机原生崩溃，见下） |
 | 后端库 | 用模块自带的 X9U 后端覆盖 `/odm/lib64` | **完全不改**，X8U 自己的库即真实后端 |
 | ISP 调谐 | 挂载 `com.qti.tuned.lighthouse*.bin` | 不下发（X8U 用逐传感器的 `com.qti.tuned.zf*.bin`） |
 | gamma 表 | 挂载 | 不下发（逐传感器曲线不同） |
-| X10 调色盘调谐 | merge | 只 merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_Palette_*.ini`；`lmt/` 保持原厂。开关由 `PaletteFeatureSwitch` 在 Java 层回答 |
+| X10 调色盘调谐 | merge | 只 merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_Palette_*.ini`；`lmt/` 保持原厂。**开关不开**：1.3.1 试过在 Java 层回答 `com.oplus.feature.color.palette.support`，开关确实生效，但 `Lut3dDataManager.e` 随即走调色盘分支、在 X8U 自己的 `libCombineLutJni.processV3` 里原生崩溃，故 1.3.2 撤回 |
 | Pro video ISZ | 启用 | 跳过（未在 X8U 上验证过） |
 
 **一条硬规则：凡是设备相关的后端库都不能放进模块的 `system/` 目录。** KernelSU 的
