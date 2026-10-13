@@ -46,6 +46,13 @@ PKJ110_PAYLOAD = {
         62330,
         "b0ee50c1a3bbc9e1dcc20f2391a490c2",
     ),
+    # Synthesised by tools/build_feature_config_v2.py: the device's own FeatureTable as tag 2,
+    # plus com.oplus.feature.color.palette.support=true as tag 1. Derived, but pinned so an
+    # accidental hand-edit (or a stale copy) cannot reach the module unnoticed.
+    "oplus_camera_feature_config": (
+        62398,
+        "5764118983057b0fb64758920d222bd4",
+    ),
 }
 # X9U payload must stay untouched by PKJ110 work.
 PMA110_PAYLOAD = {
@@ -59,7 +66,7 @@ PMA110_PAYLOAD = {
     ),
 }
 MODULE_SCRIPTS = {
-    "post-fs-data.sh": (12968, "678faefc067d0eb7ecbfe4dfd69b3d34"),
+    "post-fs-data.sh": (16192, "231da133faa5b81235bf52f052ae551c"),
     "service.sh": (6798, "4a71d4eead6cefba07c3d3f09e1ed74d"),
     "post-mount.sh": (6620, "6d2dbca7d873093e2cd83f832da0bc3d"),
     # Device-side repair/diagnostics for the POP regression; shipped so the fix can also be

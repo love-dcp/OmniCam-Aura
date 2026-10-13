@@ -3,6 +3,7 @@ from zipfile import ZipFile
 import subprocess
 import json
 import os
+import sys
 
 PROJECT = Path(__file__).resolve().parent.parent
 MODULE = PROJECT / 'module'
@@ -73,6 +74,23 @@ with ZipFile(ARCHIVE) as bundle, ZipFile(APK) as apk:
                  'positive_normal.bin', 'positive_master.bin',
                  'positive_hdr_master_a_1.bin', 'positive_hdr_master_d_1.bin'):
         require('payload/meishe_lut/' + name in names, f'Missing LUT: {name}')
+    # Palette (OCS "config parse version 2"). On version 1 -- the only version X8U's ODM ships --
+    # CameraConfigure.getProjectSupportFeatureValue() returns null for *every* com.oplus.feature.*
+    # key, so Lut3dDataManager.paletteMode() ("com.oplus.feature.color.palette.support") is
+    # permanently false and the whole palette stack stays dark even though it is present in the
+    # APK and already hooked. The PKJ110 payload therefore carries a synthesised version-2
+    # container whose FeatureTable is payload_pkj110's own protobuf, byte for byte.
+    subprocess.run([sys.executable, str(PROJECT / 'tools' / 'build_feature_config_v2.py'), '--check-only'], check=True)
+    require('payload_pkj110/oplus_camera_feature_config' in names,
+            'PKJ110 palette feature config (config parse version 2) missing from the package')
+    require('payload_pkj110/camera_unit_feature_config.protobuf' in names,
+            'PKJ110 source FeatureTable missing: the config v2 build cannot be re-derived')
+    for prefix in ('payload/x10_basictone/palette/HDR/SC16Lut', 'payload/x10_basictone/palette/SDR/SC16Lut'):
+        for index in range(9):
+            require(f'{prefix}{index}' in names, f'Palette colour card missing: {prefix}{index}')
+    for name in ('SimTool_Palette_Photo_Normal.ini', 'SimTool_Palette_Photo_Night.ini',
+                 'SimTool_Palette_Photo_Portrait.ini', 'SimTool_Preview_Palette_Normal.ini'):
+        require('payload/x10_basictone/setting/' + name in names, f'Palette settings missing: {name}')
 
 manifest = subprocess.check_output([str(BUILD_TOOLS / 'aapt2.exe'), 'dump', 'xmltree', str(APK), '--file', 'AndroidManifest.xml'], text=True, encoding='utf-8')
 badging = subprocess.check_output([str(BUILD_TOOLS / 'aapt2.exe'), 'dump', 'badging', str(APK)], text=True, encoding='utf-8')
@@ -110,6 +128,14 @@ require('elif [ "$PROFILE" != PMA110 ]; then' in hwcfg,
         'Pro video ISZ is no longer gated away from the PKJ110 profile')
 for name in ('PROFILE=$(detect_profile)', 'CONFIG_SRC=$MODDIR/payload_pkj110'):
     require(name in hwcfg, f'PKJ110 profile selection missing from post-fs-data.sh: {name}')
+# The version-2 config has no stock counterpart to bind onto (/odm is erofs and the file does not
+# exist there), so the PKJ110 profile has to merge the whole config directory instead of binding
+# the individual files. Both halves -- the container and the colour cards -- are asserted so a
+# regression cannot silently leave the palette switched off again.
+require('bind_merged_dir /odm/etc/camera/config' in hwcfg,
+        'PKJ110 config directory is no longer merged: oplus_camera_feature_config cannot be added')
+require('x10_basictone/palette' in hwcfg and 'SimTool_Palette_' in hwcfg,
+        'PKJ110 palette colour cards are no longer merged into basictone')
 mount = (MODULE / 'post-mount.sh').read_text(encoding='utf-8')
 require('PROFILE=$(detect_profile)' in mount, 'PKJ110 profile selection missing from post-mount.sh')
 require('bind_library "$MODDIR/payload/lib64/' in mount,
@@ -118,4 +144,4 @@ for lib in ('libAlgoInterface.so', 'libBasicTonePhoto.so', 'libmsnativefilter.so
     require(f'"$MODDIR/payload/lib64/{lib}"' in mount,
             f'PMA110 backend bind lost: {lib}')
 subprocess.run(['cmd', '/c', str(BUILD_TOOLS / 'apksigner.bat'), 'verify', str(APK)], check=True)
-print('PASS: signed headless Aura APK; camera/gallery scope; GR/POP backends and all six palette capture nodes present; two device profiles wired; pro video ISZ present and PMA110-gated')
+print('PASS: signed headless Aura APK; camera/gallery scope; GR/POP backends and all six palette capture nodes present; two device profiles wired; pro video ISZ present and PMA110-gated; PKJ110 palette config v2 + colour cards packaged')

@@ -195,10 +195,14 @@ ro.product.odm.vendor.device ro.vendor.oplus.device      # 兜底，实测在 PK
 
 ### 3.4 顺带修掉的第二处越界
 
-`post-fs-data.sh` 里把 `payload/x10_basictone/`（X10 调色盘的 `lmt/`、`palette/`、4 个
+`post-fs-data.sh` 里原来把 `payload/x10_basictone/`（X10 调色盘的 `lmt/`、`palette/`、4 个
 `SimTool_Palette_*.ini`）**无条件** merge 进 `/odm/etc/camera/basictone`。这些是**逐设备调谐表**，
-由 BasicTone/AlgoInterface 直接读取，性质与后端库同类，现在也按机型门控。GR 自己的
+由 BasicTone/AlgoInterface 直接读取，性质与后端库同类，现在按机型门控。GR 自己的
 `setting_Retro/` 仍然照常 merge。
+
+1.3.0 起 X8U 侧改为**只** merge `palette/{HDR,SDR}/SC16Lut0..8` 与 4 个
+`SimTool_Palette_*.ini`（调色盘色卡本身），`lmt/{LMTPhotoLut*,SCLut*}` 仍然不 merge —— 详见
+§4.10。
 
 ### 3.5 刷入后怎么确认真的生效
 
@@ -268,8 +272,9 @@ adb shell su -c 'cat /data/adb/modules/omnicam_aura/mount.log'   # 应含 begin 
 adb shell su -c 'cat /data/adb/modules/omnicam_aura/bind.log'    # 应含 config=.../payload_pkj110
 ```
 
-**代价（必须知道）**：依赖 X9/X10 后端的「Find X10 清透／琥珀滤镜 / 调色盘」这类功能在 X8U 上
-拿不到；GR 模式、复古 POP、移轴、水印、高像素这些不依赖后端库替换的功能不受影响。
+**代价（必须知道）**：依赖 X9/X10 **后端库**的功能在 X8U 上拿不到 —— X8U 跑的是自己的
+`libBasicTonePhoto.so` / `libAlgoInterface.so` / `libmsnativefilter.so`，模块不替换它们。
+GR 模式、复古 POP、移轴、水印、高像素、调色盘这些不依赖后端库替换的功能不受影响（调色盘见 §4.10）。
 
 ### 3.6 本机 root 是临时的：只能软重启，overlay 不会重建（关键约束）
 
@@ -440,15 +445,29 @@ OmniCam 原 payload 的 `camera_unit_config` 其实就是「**X9U 原厂配置 +
    插入从 X9U payload 原样搬来的 3 个 `map<string,Msg>` 条目（`gr_mode`、`retro_camera_mode`、
    `tilt_shift_mode`）——**不是**追加到文件末尾，原因见 §4.2。
 
+3. `oplus_camera_feature_config`（**1.3.0 新增**）：OCS 的「config parse version 2」容器，
+   X8U 原厂**完全没有这个文件**。由 `tools/build_feature_config_v2.py` 从上面第 2 份的
+   FeatureTable 无损合成 —— 那 62,330 B 原样作为 tag 2，只追加一个调色盘开关作为 tag 1。
+   它存在与否决定 `getParseVersion()` 是 2 还是 1，也就是调色盘面板能不能亮 —— 详见 **§4.10**。
+
 **按机型选目录**：`post-fs-data.sh` 里
 
 ```sh
+PROFILE=$(detect_profile)
 if [ "$PROFILE" = PMA110 ]; then CONFIG_SRC=$MODDIR/payload
 else                            CONFIG_SRC=$MODDIR/payload_pkj110; fi
+...
+if [ "$PROFILE" = PMA110 ]; then
+    for NAME in ...; do bind_file "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"; done
+else
+    # [PKJ110] 整目录合并进 CONFIG_EXTRA，再 bind_merged_dir /odm/etc/camera/config
+fi
 ```
 
-因为 `payload_pkj110/` 只有这两份文件，循环里其余名字会被 `bind_file` 的「无 payload」分支跳过。
-这样既让 X8U 拿到正确的 GR 配置，又**不覆盖** `payload/` 里 PMA110 需要的那一套。
+PMA110 沿用逐文件 `bind_file`；PKJ110 自 1.3.0 起把 `/odm/etc/camera/config` **整目录合并**
+（原因是该目录多了一份 X8U 原厂根本没有的 `oplus_camera_feature_config`，而 `/odm` 是只读 erofs、
+没有可 bind 的目标文件 —— 见 §4.10.5）。两条路径都**不覆盖** `payload/` 里 PMA110 需要的那一套，
+也不动 PMA110 的原厂字节。
 
 **X8U 上不绑定**的项及原因：
 
@@ -463,8 +482,10 @@ else                            CONFIG_SRC=$MODDIR/payload_pkj110; fi
 且带「live 目录不存在就跳过」的保护。
 
 > `payload/x10_basictone/` **不是**这类资源：它是 X10 调色盘的逐设备调谐表（`lmt/{LMTPhotoLut*,SCLut*}`、
-> `palette/{HDR,SDR}`、4 个 `SimTool_Palette_*.ini`），会被 BasicTone/AlgoInterface 直接读取，
-> 所以它和那三个后端库同性质——**只在 PMA110 merge**（见 §3.4）。
+> `palette/{HDR,SDR}`、4 个 `SimTool_Palette_*.ini`），会被 BasicTone/AlgoInterface 直接读取。
+> 因此它按文件类型拆开：`lmt/` **只在 PMA110 merge**（见 §3.4），`palette/` 与 4 个
+> `SimTool_Palette_*.ini` 自 1.3.0 起两个机型都 merge（X8U 原厂目录里这些名字**完全不存在**，
+> 属于纯追加，撤销只需去掉 bind —— 见 §4.10）。
 > GR 自己的 `payload/setting_Retro/` 两个机型都下发。
 
 ### 4.1 `camera_unit_config` 必须做「文本级插入」，不能重新序列化
@@ -1247,7 +1268,7 @@ python tools/verify_port_artifacts.py --skip-zip   # 重打包之前跑
 ```
 
 ```
-[1/6] pinned payload bytes        PKJ110 两份 + PMA110 两份不变
+[1/6] pinned payload bytes        PKJ110 三份（含 1.3.0 的调色盘容器）+ PMA110 两份不变
 [2/6] mirror                      module/payload_pkj110 == port-x8u/payload
 [3/6] pair-list deformation       verify_payload_json.py 退 0，且能识别留档的坏版
 [4/6] semantic diff               见 4.8.2 那张表
@@ -1258,9 +1279,8 @@ python tools/verify_port_artifacts.py --skip-zip   # 重打包之前跑
 `camera_unit_config.broken.bak` 已从 `module/payload_pkj110/` 移到 `port-x8u/broken/`：
 它留在模块源码树里就迟早会被某次朴素打包带进模块。第 6 组检查会对任何 `.bak` 直接报错。
 
-当前状态：**PASS: all checks green**（`OmniCam-Aura-1.2.0-KSU.zip`，54,317,379 B，2026-10-13 20:00
-重打包；包内含 `module/x8u-fix-pop.sh`、`module/x8u-fix-vibrant.sh` 等五个脚本，
-可脱离 PC 在设备上执行）。
+当前状态（1.3.0）：**PASS: all checks green**（`OmniCam-Aura-1.3.0-KSU.zip`，54,327,588 B；
+包内含 `module/x8u-fix-pop.sh`、`module/x8u-fix-vibrant.sh` 等五个脚本，可脱离 PC 在设备上执行）。
 
 ### 4.9 POP 的「浓郁」滤镜没反应 —— X8U 的 ODM 里**整个 `positive_*` 色卡家族都不存在**
 
@@ -1395,11 +1415,144 @@ X8U 的 ODM 里有一个语义等价、**确实存在**的正片色卡：
 `bright_coloured.bin` 的"鲜艳"味），**同时把
 `tools/verify_port_artifacts.py` 里的 `POSITIVE_LUT_SIZE/MD5` 与
 `module/x8u-fix-vibrant.sh` 里的 `SZ_LUT/MD_LUT` 一起改掉**，再
-`python tools/zip_module.py module OmniCam-Aura-1.2.0-KSU.zip`。
+`python tools/zip_module.py module OmniCam-Aura-1.3.0-KSU.zip`。
 
 护栏：`tools/verify_port_artifacts.py` 第 1 组新增 8 份色的
 `POSITIVE_LUT_SIZE/POSITIVE_LUT_MD5` 定值与归档内校验，第 6 组加了
 `x8u-fix-vibrant.sh` 的 size/md5 定值；`tools/verify_aura.py` 也要求这 8 个名字在包里。
+
+### 4.10 X8U 的 X10 调色盘（Palette）：缺的不是后端库，是 OCS 的 config 容器
+
+1.3.0 补上的最后一块。
+
+#### 4.10.1 症状与第一层判据
+
+大师 / 哈苏滤镜下本该弹出**调色盘面板**，X8U 上**不弹**（用户实机确认）。但：
+模块日志里 `X10Filter: palette compatibility`、`X10Filter: palette color compatibility`、
+`X10Filter: palette capture hook installed`、`HighPixelEffects: preview palette / preview palette
+engine installed` 全都打了 ⇒ **LSPosed 钩子是装上的**，ipuapi 的调色盘栈也在。
+
+决定性的一点：`HighPixelEffects.paletteConfigured()` 是通过
+`XposedBridge.invokeOriginalMethod(paletteMode, null, {"common"})` **调用原方法**的，即
+**主动尊重系统开关**。所以"模块在不在"不是问题，问题是**开关本身取不到值** ⇒ 模块无法代替
+缺失的配置。
+
+#### 4.10.2 开关的解析链
+
+```
+Lut3dDataManager.paletteMode(scene)
+  → CameraConfig.d("com.oplus.feature.color.palette.support", false, false)
+  → CameraConfig.w → CameraConfig.b → CameraConfig.y
+  → FeatureApi.getProjectSupportFeatureValue(key)
+  → CameraConfigure.getProjectSupportFeatureValue(key)
+  → CameraConfigure.sVendorTagMap.get(key)          ← 最终落点
+```
+
+`paletteMode()` 默认值就是 `false`，所以整条链任何一环返回 null，结果都是"调色盘关闭"。
+
+#### 4.10.3 版本闸门（真正的根因）
+
+`ProtobufConfigureHelper.getParseVersion()` 的实现是：
+
+```java
+isFileNotEmpty("<cfgdir>/etc/camera/config/oplus_camera_feature_config") ? 2 : 1
+```
+
+`<cfgdir>` 由 `ApsUtils.getConfigJsonDirectory()` 决定：`/apex/com.oplus.camera.aps` 存在则用它，
+否则落 `/odm`（**X8U 上该 apex 不存在 → `/odm`**）。而
+
+> `CameraConfigure.getProjectSupportFeatureValue()` 在 `parseVersion == 1` 时**对所有
+> `com.oplus.feature.*` 键一律返回 null**。
+
+X8U 原厂 `/odm/etc/camera/config/` 下**只有** `camera_unit_config` 和
+`camera_unit_feature_config.protobuf`，**没有** `oplus_camera_feature_config` ⇒
+`getParseVersion() == 1` ⇒ `sVendorTagMap` 恒空 ⇒ `paletteMode()` 恒 false ⇒
+`CombineLutHelper.init(..., "/odm/etc/camera/basictone/palette")` 永远不执行。
+这就是"钩子在、后端在、开关不亮"的全部原因。
+
+> 交叉证据：不叠加任何东西时，日志是 `decodeConfigFileVersion1, odmVersionNum: 1`；叠加 V2 容器后
+> 立刻变成 `config parse ver2: true`（见 4.10.7）。
+
+#### 4.10.4 V2 容器格式（`CameraConfigure.decodeConfigFileVersion2`）
+
+整数**全部大端 int32**（`Util.byteArrayToInt`）：
+
+```
+int32 odmFileVersion
+int32 entryCount
+repeat entryCount times:
+    int32 tagId
+    int32   length
+    byte[length] payload
+```
+
+- `tagId == 1` → UTF-8 文本 `key:value|key:value`，由 `generateVendorTagMap` **先按 `|` 再按 `:`**
+  分割成 map（所以分隔符必须是 `:`，写成 `=` 会被当成 value 的一部分 —— 早期测试样本就是这么错的）。
+- `tagId == 2` → 裸 `ProtobufFeatureConfig.FeatureTable` 字节，走
+  `parseProtobufFeature` → `FeatureTable.parseFrom`。
+
+对照 **V1**：裸 protobuf、无头。X8U 设备端 `camera_unit_feature_config.protobuf` 的头就是
+`0a06636f6d6d6f6e`（`0a 06 "common"`，field1 字符串池），没有 15 字节 `pb_file_version:` ASCII 头，
+因此 `getDefaultConfigVersionNum` 不会去读版本号。
+
+#### 4.10.5 SELinux 与只读 `/odm`：为什么必须整目录合并
+
+- 标签是**混合**的：`/odm/etc/camera/config/` 目录本身是
+  `u:object_r:vendor_configs_file:s0`，但 `camera_unit_config` 与
+  `camera_unit_feature_config.protobuf` 是 `u:object_r:system_file:s0`。
+- `/data/local/tmp/*` 默认 `shell_data_file`，**相机进程读不到**。实测直接把 `cp` 过去的配置 bind
+  上去 → 相机启动即崩（`NullPointerException ... CameraUnitClient.openCamera ... on a null object
+  reference`，`CameraUnitControl` 线程）。**必须给叠加目录和每个文件 `chcon` 回原上下文**。
+- `/odm` 是 **erofs 只读**，且 `oplus_camera_feature_config` 在 X8U 上**根本不存在** ——
+  没有"目标文件"可以 `mount --bind`。所以 PKJ110 的 `/odm/etc/camera/config` 走
+  **整目录 `bind_merged_dir`**（合并源落 `/data/adb/omnicam_aura/merged/<tag>/config_extra`），
+  三个文件一起合成一个目录视图。PMA110 仍是逐文件 `bind_file`，行为不变。
+
+#### 4.10.6 无损合成
+
+`tools/build_feature_config_v2.py`：把设备**自己的** FeatureTable 原样搬运为 tag 2，只把调色盘
+开关放进 tag 1：
+
+```
+tag 2 = payload_pkj110/camera_unit_feature_config.protobuf    (62,330 B, b0ee50c1…)
+tag 1 = "com.oplus.feature.color.palette.support:true"
+```
+
+产物 `payload_pkj110/oplus_camera_feature_config` = **62,398 B**，`odmFileVersion=2, entryCount=2`。
+
+**为什么无损**：C 侧对**缺席**的 key 仍返回 null（即原 v1 行为完全不变），我们只是**多塞进一个
+`true`** —— 等价于"只多开一个开关"，不动任何既有键。脚本自带 `--check-only`：复现
+`CameraConfigure` 的解析，断言 blob 被完整消费（`off == len(blob)`）、tag 2 与源文件逐字节相等、
+tag 1 可解析为 `key:value`，并已接入 `tools/verify_aura.py` 发布闸。
+
+#### 4.10.7 实机验证（2026-10-13）
+
+在 X8U（PKJ110）上 bind 叠加 V2 容器后：
+
+| 观测点 | 基线（无叠加） | 叠加 V2 后 |
+|---|---|---|
+| `decodeConfigFileVersion*` | `decodeConfigFileVersion1, odmVersionNum: 1` | 走 V2 分支 |
+| `OCAM_MyApplication: attachBaseContext …, config parse ver2: …` | `false` | **`true`** |
+| `setIsVendorTagConfigInitialize` | `false` | **`false > true`** |
+| `CameraConfigHelper: initialize config` | — | 正常完成 |
+| 相机 | 正常 | **不崩，正常** |
+
+#### 4.10.8 色卡从哪来
+
+`Lut3dDataManager.e`：`paletteMode == true` 时调
+`CombineLutHelper.init(..., "/odm/etc/camera/basictone/palette")`（另有
+`com.oplus.natural.tone.support` 分支）。X8U 原厂 basictone 里**没有** `palette/`，而 X10 的
+`palette/{HDR,SDR}/SC16Lut0..8`（18 张，各 **49,152 B**）与 X8U 原厂 `lmt/` **零同名** ⇒
+可**纯追加、可回退**。
+
+1.3.0 起 PKJ110 的 basictone **只 merge `palette/` 与 4 个 `SimTool_Palette_*.ini`**，
+`lmt/`（逐机型 tone 表）保持 X8U 原厂不下发。注意 `bind_merged_dir` 的合并源必须**同时**带上模块
+运行时创建的 `setting_Retro/`（`/odm` 只读、无法在挂载视图里重新 mkdir），否则会把它遮住。
+
+#### 4.10.9 回退
+
+停用模块（或删掉叠加目录）后 `parseVersion` 回到 1，`sVendorTagMap` 重新为空 ⇒ 调色盘回到
+原厂"不可用"状态，无残留副作用。
 
 ---
 
@@ -1503,7 +1656,14 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 - [ ] ISP GR 调谐（`com.qti.tuned.zf*.bin`）与 gamma 表的 X8U 版本 —— 需要厂商调优工具，本工程无法生成。
 - [ ] `oplus_camera_config` / `algo_switch_config` / `aps_config` / 两个 `*_decision*.json` 的
       解密与 GR 化（X8U 盘上为加密二进制）。
-- [ ] X10 滤镜/调色盘（依赖 `libBasicTonePhotoX9/X10.so` 后端）在 X8U 上默认不可用。
+- [x] ~~X10 调色盘（依赖 `libBasicTonePhotoX9/X10.so` 后端）在 X8U 上默认不可用。~~
+      —— **已定位并修复（§4.10）**。调色盘**不依赖** `libBasicTonePhotoX9/X10.so`：真正缺的是 OCS 的
+      「config parse version 2」容器 `oplus_camera_feature_config`（X8U 原厂没有它 ⇒
+      `getParseVersion()==1` ⇒ `getProjectSupportFeatureValue()` 对所有 `com.oplus.feature.*`
+      返回 null ⇒ `paletteMode()` 恒 false）。1.3.0 用设备自己的 FeatureTable 无损合成该容器
+      （只追加 `com.oplus.feature.color.palette.support=true`，其它键缺席仍解析为 null），并只 merge
+      X10 的 `palette/{HDR,SDR}` 色卡 + 4 个 `SimTool_Palette_*.ini`。实机已确认
+      `config parse ver2: true`、相机不崩。**面板 UI 与成片效果仍待上机逐项确认。**
 - [ ] `libmsnativefilter.so` 是否要替换（模块 10.96 MB vs 设备 7.99 MB）——默认不换。
 - [ ] 实机验证 `frame+0x18` / `object+0x008` 两处写操作（静态一致，但仍属高风险写）。
 - [ ] `Zoom.labelBitmaps` 用的是类型级多命中，若后续机型把非缓存 Bitmap 也放进 `ZoomSeekBar`，
@@ -1592,9 +1752,10 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 ### 8.1 仓库内（离线，随包交付）
 
 ```
+tools/verify_aura.py             模块布局硬断言 + 打包一致性（原有）
+tools/build_feature_config_v2.py 合成 PKJ110 的 OCS parse-version-2 容器（§4.10）；--check-only 自校验
 tools/verify_port_artifacts.py   发布闸门：md5 定值 / payload 镜像 / JSON 形状 / 语义 diff / 原生指纹 / zip 内容
 tools/verify_payload_json.py     pair-list 变形检测（扫描 module/payload* + port-x8u/payload）
-tools/verify_aura.py             模块布局硬断言 + 打包一致性（原有）
 tools/zip_module.py              打包 module/ → OmniCam-Aura-<ver>-KSU.zip
 
 module/x8u-fix-pop.sh            【设备侧】umount-first bind + 写回 payload + 六项复核（随模块下发，可无 PC 直接跑）

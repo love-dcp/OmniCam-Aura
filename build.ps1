@@ -1,4 +1,7 @@
-$ErrorActionPreference = 'Stop'
+# Native tools (java/apksigner/gradle) write warnings to stderr. Under PowerShell 5.1
+# an ErrorActionPreference of 'Stop' turns the first such write into a terminating
+# NativeCommandError even when the tool exits 0. Keep 'Continue' and gate on $LASTEXITCODE.
+$ErrorActionPreference = 'Continue'
 $project = $PSScriptRoot
 $python = if ($env:OMNICAM_PYTHON) { $env:OMNICAM_PYTHON } else { (Get-Command python -ErrorAction Stop).Source }
 $version = ((Get-Content (Join-Path $project 'module/module.prop') | Where-Object { $_ -like 'version=*' }) -replace '^version=', '').Trim()
@@ -20,7 +23,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'gradle build failed' }
     } finally { Pop-Location }
 } finally { subst "$($drive):" /D }
-Copy-Item -LiteralPath (Join-Path $project 'app/build/outputs/apk/release/app-release.apk') -Destination (Join-Path $project "module/$apkName")
+Copy-Item -LiteralPath (Join-Path $project 'app/build/outputs/apk/release/app-release.apk') -Destination (Join-Path $project "module/$apkName") -ErrorAction Stop
 & $python (Join-Path $project 'tools/zip_module.py') (Join-Path $project 'module') $archive
 if ($LASTEXITCODE -ne 0) { throw 'module packaging failed' }
 & $python (Join-Path $project 'tools/verify_aura.py')

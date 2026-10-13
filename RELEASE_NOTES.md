@@ -1,9 +1,31 @@
-# OmniCam Aura 1.2.0
+# OmniCam Aura 1.3.0
 
-无界面相机模块。**新增 OPPO Find X8 Ultra（PKJ110，相机 7.006.94）支持**，与原本已验证的
-Find X9 Ultra（PMA110，相机 7.006.77）共用同一个包，机型开机自动判定。
+无界面相机模块。在既有的 Find X9 Ultra（PMA110，相机 7.006.77）与 Find X8 Ultra
+（PKJ110，相机 7.006.94 / 实机 7.006.123）支持之上，**1.3.0 补齐 X8U 的 X10 调色盘（Palette）**，
+两台设备共用同一个包，机型开机自动判定。
 
-## 本次新增（PKJ110）
+## 本次新增（1.3.0 · PKJ110 调色盘）
+
+- **X8U 调色盘可用**。根因既不是缺后端库，也不是 LSPosed 钩子没装，而是 X8U 的 ODM 里
+  **没有 OCS 的「config parse version 2」容器** `oplus_camera_feature_config`：
+  `ProtobufConfigureHelper.getParseVersion()` 在它缺失时返回 1，而
+  `CameraConfigure.getProjectSupportFeatureValue()` 在 `parseVersion == 1` 时**对所有
+  `com.oplus.feature.*` 键一律返回 null**，于是 `Lut3dDataManager.paletteMode()` 恒为 false，
+  `CombineLutHelper.init()` 永远走不到 `/odm/etc/camera/basictone/palette/*`。
+  修复方式是把设备**自己的** `camera_unit_feature_config.protobuf`（FeatureTable，62,330 B /
+  `b0ee50c1…`）原样搬运为 V2 容器的 tag 2，只把调色盘开关
+  `com.oplus.feature.color.palette.support=true` 作为 tag 1 追加进去 —— 无损：其它键在 tag 1
+  缺席时仍按 v1 行为解析为 null，等于"只多开了一个开关"。
+- **X8U 只合并 `x10_basictone/` 的调色盘那一半**：`palette/{HDR,SDR}/SC16Lut0..8` 共 18 张
+  色卡 + 4 个 `SimTool_Palette_*.ini`；`lmt/`（逐机型 tone 表）保持 X8U 原厂不下发。
+  纯追加、可回退。
+- **新增离线合成器 `tools/build_feature_config_v2.py`**：从 `payload_pkj110/` 的 FeatureTable
+  生成 V2 容器，带 `--check-only` 自校验（复现 `CameraConfigure` 的解析，断言 blob 被完整消费、
+  tag 2 与源文件逐字节相等、tag 1 为 `key:value` 文本），并已接入 `tools/verify_aura.py` 发布闸。
+- 设备端已实测：叠加 V2 容器后相机正常启动，日志由 `config parse ver2: false` 变为
+  **`config parse ver2: true`**，`CameraConfigHelper: initialize config` 正常完成。
+
+## 本次新增（1.2.0 · PKJ110）
 
 - **POP 模式可用**。两条独立故障都修掉了：配置层是 `camera_unit_config` 的 `usecase_info`
   写成畸形配对表（每条本该是「单键对象列表」），native 层是模块自己的 LSPosed 原生钩子在
@@ -21,7 +43,7 @@ Find X9 Ultra（PMA110，相机 7.006.77）共用同一个包，机型开机自�
 - **未改 X8U 的任何后端库**。X9U 的 `libAlgoInterface.so` / `libBasicTonePhoto.so` /
   `libmsnativefilter.so` 从模块 `system/` 移到 `payload/lib64/`，只在 PMA110 上 bind。
 
-## 本次新增（沿用 1.1.1）
+## 本次新增（1.1.1）
 
 - 专业视频（含 O-Log2）强制启用 ISZ：主摄 2x、长焦 6x 去掉 ISO 门限（模块目录放
   `disable_pro_video_isz` 可关闭）。**仅 PMA110 生效**：该补丁对 PMA110 的
@@ -45,8 +67,9 @@ Find X9 Ultra（PMA110，相机 7.006.77）共用同一个包，机型开机自�
   已安装模块与 APK 并逐项使用。
 - 已验证（PKJ110）：模块与 APK 已实机安装；相机正常启动并稳定运行；**POP 模式可用，切到 POP
   不再闪退，POP 的全部滤镜（含此前失效的「浓郁」）均生效**；GR 的符号层与原生 `getSettingInt`
-  指纹已按设备上的 `libAlgoInterface.so` 复核一致。
-- 待验证 / 已知限制：X8U 上的移轴、X10 调色盘、滑杆与前置成片尚未逐项走查（X10 调色盘还依赖
-  `libBasicTonePhotoX9/X10.so` 后端，按设计在 PKJ110 上不加载，因此默认不可用）；
-  X8U 的 ISP GR 调谐与 gamma 表（厂商调优工具才能生成）不在此次范围内；Pro video ISZ 故意
-  未在 X8U 上启用。完整的未决清单见 `port-x8u/README.md` 第 7 节。
+  指纹已按设备上的 `libAlgoInterface.so` 复核一致；调色盘 V2 容器叠加后相机不崩溃，
+  `config parse ver2` 由 false 翻为 true。
+- 待验证 / 已知限制：X8U 上的移轴、滑杆与前置成片尚未逐项走查；X8U 的 X10 调色盘的**开关与
+  色卡已随 1.3.0 下发并经实机确认 `config parse ver2: true`**，但面板 UI 与成片效果仍需上机
+  逐项确认；X8U 的 ISP GR 调谐与 gamma 表（厂商调优工具才能生成）不在此次范围内；Pro video
+  ISZ 故意未在 X8U 上启用。完整的未决清单见 `port-x8u/README.md` 第 7 节。
