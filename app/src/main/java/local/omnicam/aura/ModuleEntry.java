@@ -2,6 +2,8 @@ package local.omnicam.aura;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import local.jiege.hook.common.CameraSessionProbe;
+import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Symbols;
 import local.jiege.hook.filters.FilterGroupInjector;
 import local.jiege.hook.masterfilter.MasterPresetListSync;
@@ -22,6 +24,7 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
         } else if ("com.oplus.camera".equals(param.packageName)) {
             System.loadLibrary("aura_native");
             Symbols.install("camera", loader, param.appInfo.sourceDir, param.appInfo.dataDir);
+            Log.guard("PopPort", "session probe", () -> CameraSessionProbe.install(loader));
             PopPort.installCamera(loader, "com.oplus.camera".equals(param.processName));
             FilterGroupInjector.installCamera(loader);
             MasterPresetListSync.install(loader);

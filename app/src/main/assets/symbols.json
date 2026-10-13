@@ -1519,6 +1519,12 @@
    "name": "I6",
    "type": "android.graphics.Bitmap"
   },
+  "Zoom.labelBitmaps": {
+   "kind": "field",
+   "in": "com.oplus.camera.feature.zoom.view.ZoomSeekBar",
+   "type": "android.graphics.Bitmap",
+   "multi": true
+  },
   "Zoom.fadeLabels": {
    "kind": "method",
    "in": "com.oplus.camera.feature.zoom.view.ZoomSeekBar",

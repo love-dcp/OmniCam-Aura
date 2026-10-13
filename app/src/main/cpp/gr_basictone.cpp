@@ -5,7 +5,12 @@
 //   * BasicTone: the GR LMT/SC/CWCM tree (staged by service.sh) instead of the host ODM tree;
 //   * no artistic vignette from the V1 vignette parameters;
 //   * the Meishe V1 filter node (clarity, vignette, grain), run with the GR capture mode.
-// Offsets are for PMA110 Camera 7.006.77 (libAlgoInterface.so / libBasicTonePhoto*.so).
+//
+// Only ONE value in this file is a raw file offset that changes between firmware builds:
+// the address of the non-exported `getSettingInt` accessor. Everything else is resolved by symbol
+// name (dlsym) and every struct field offset below has been byte-verified against both libraries
+// (see port-x8u/README.md §2). `getSettingInt` is picked at load time from a fingerprint table so
+// one APK serves both PMA110 (Find X9 Ultra) and PKJ110 (Find X8 Ultra).
 #include <android/log.h>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +34,35 @@ struct alignas(8) SettingKey {
     char text[23];
 };
 const SettingKey kGrSizeKey = {28, "gr_effect_size"};
+
+// `android::getSettingInt` is not exported, so it is reached by file offset. The first four
+// instructions of the function are stable per build and are used to select the right offset, which
+// also means a wrong table entry fails safe (hook installation is skipped, camera stays untouched).
+//
+// Layouts verified on 2026-10-11 by disassembling libAlgoInterface.so of both firmware images:
+//   PMA110 ColorOS / Camera 7.006.77  offset 0x150cdd0
+//       paciasp; sub sp, sp, #0x90; stp x29,x28,[sp,#0x60]; stp x21,x20,[sp,#0x50]
+//   PKJ110 ColorOS 17 F.21 / Camera 7.006.94  offset 0x13f46d4
+//       paciasp; sub sp, sp, #0x90; stp x29,x28,[sp,#0x60]; stp x23,x22,[sp,#0x70]
+// Both builds call this accessor from getLmtParamsV1 (5 call sites) and getVigParamsV1.
+struct SettingIntLayout {
+    const char *build;
+    uint8_t prologue[16];
+    uintptr_t offset;
+};
+
+constexpr SettingIntLayout kSettingIntLayouts[] = {
+    {// Find X9 Ultra (PMA110), libAlgoInterface.so, Camera 7.006.77
+     "PMA110/7.006.77",
+     {0x3f, 0x23, 0x03, 0xd5, 0xff, 0x43, 0x02, 0xd1,
+      0xfd, 0x7b, 0x06, 0xa9, 0xf5, 0x3b, 0x00, 0xf9},
+     0x150cdd0},
+    {// Find X8 Ultra (PKJ110), libAlgoInterface.so, Camera 7.006.94
+     "PKJ110/7.006.94",
+     {0x3f, 0x23, 0x03, 0xd5, 0xff, 0x43, 0x02, 0xd1,
+      0xfd, 0x7b, 0x06, 0xa9, 0xf6, 0x57, 0x07, 0xa9},
+     0x13f46d4},
+};
 
 int (*getSettingInt)(void *settings, const void *key, int fallback);
 void (*originalGetLmtParams)(void *, void *, int);
@@ -128,15 +162,30 @@ uintptr_t loadLut(void *object, int mode) {
     return originalLoadLut(object, mode);
 }
 
+void *resolveSettingInt(void *base) {
+    for (const auto &layout : kSettingIntLayouts) {
+        auto *candidate = static_cast<char *>(base) + layout.offset;
+        if (std::memcmp(candidate, layout.prologue, sizeof(layout.prologue)) == 0) {
+            __android_log_print(ANDROID_LOG_INFO, kTag, "getSettingInt layout=%s offset=%#lx",
+                                layout.build, static_cast<unsigned long>(layout.offset));
+            return candidate;
+        }
+    }
+    __android_log_print(ANDROID_LOG_ERROR, kTag,
+                        "getSettingInt: no known layout matched, GR hook disabled");
+    return nullptr;
+}
+
 void hookAlgoInterface(HookFunction hook, void *handle) {
     if (originalGetLmtParams) return;
     const char *lmtSymbol = "_ZN7android14getLmtParamsV1ER12ProcessParamPNS_15AlgoProcessDataEi";
     Dl_info info{};
     void *lmtAddress = dlsym(handle, lmtSymbol);
     if (!lmtAddress || !dladdr(lmtAddress, &info)) return;
-    // Same setting accessor that getLmtParamsV1 calls at 0x2035b78.
-    getSettingInt = reinterpret_cast<decltype(getSettingInt)>(
-        static_cast<char *>(info.dli_fbase) + 0x150cdd0);
+    // Same setting accessor that getLmtParamsV1 calls (X9U +0x1198, X8U +0x117c).
+    void *accessor = resolveSettingInt(info.dli_fbase);
+    if (!accessor) return;
+    getSettingInt = reinterpret_cast<decltype(getSettingInt)>(accessor);
     hookExport(hook, handle, lmtSymbol, reinterpret_cast<void *>(getLmtParams),
                reinterpret_cast<void **>(&originalGetLmtParams), kTag);
     filterProcessV1 = reinterpret_cast<decltype(filterProcessV1)>(
@@ -156,7 +205,9 @@ void hookAlgoInterface(HookFunction hook, void *handle) {
 
 void hookBasicTone(HookFunction hook, void *handle) {
     if (originalProcessCore && originalLoadLut) return;
-    // The X10 router exports getAlgoAPI only; its X9 backend keeps these BasicTone_OGL entries.
+    // The X10 router exports getAlgoAPI only; its X9/X10 backends keep these BasicTone_OGL entries.
+    // PKJ110 has no router: its libBasicTonePhoto.so *is* the backend, so the same two symbols are
+    // exported directly and this branch fires on the plain library name.
     const char *coreSymbol = "_ZN13BasicTone_OGL11processCoreEP5ImageS1_PvS2_";
     if (!dlsym(handle, coreSymbol)) return;
     hookExport(hook, handle, coreSymbol, reinterpret_cast<void *>(processCore),
@@ -168,9 +219,28 @@ void hookBasicTone(HookFunction hook, void *handle) {
 }  // namespace
 
 void onLibraryLoadedForGr(HookFunction hook, const char *name, void *handle) {
+    // LSPosed forwards EVERY dlopen() in the process to this callback — including
+    // dlopen(nullptr, ...), which is a legal way to obtain the main-program handle. Callers really
+    // do use it: libfusioninterpolation.arcsoft.so does exactly that as soon as the POP/FRC pipeline
+    // comes up. Without this guard the first std::strstr() below dereferences NULL and takes the
+    // whole camera down; the tombstone reads
+    //   #00 __strchr_aarch64  #01 strstr  #02 libaura_native.so  #03 zygisk_lsposed
+    //   #05 dlopen  #06 libfusioninterpolation.arcsoft.so
+    // signal 11 (SIGSEGV), fault addr 0x0 (read), Cause: null pointer dereference.
+    // A NULL name cannot match any library we care about, so returning is also the correct answer.
+    if (name == nullptr || handle == nullptr) {
+        static bool reportedNullLoad = false;
+        if (!reportedNullLoad) {
+            reportedNullLoad = true;
+            __android_log_print(ANDROID_LOG_INFO, kTag,
+                                "dlopen(NULL) observed; nameless load ignored (no crash)");
+        }
+        return;
+    }
     if (std::strstr(name, "libAlgoInterface.so")) {
         hookAlgoInterface(hook, handle);
-    } else if (std::strstr(name, "libBasicTonePhotoX9.so") || std::strstr(name, "libBasicTonePhoto.so")) {
+    } else if (std::strstr(name, "libBasicTonePhotoX9.so") || std::strstr(name, "libBasicTonePhotoX10.so") ||
+               std::strstr(name, "libBasicTonePhoto.so")) {
         hookBasicTone(hook, handle);
     }
 }

@@ -8,6 +8,7 @@
 # Generated Android and Gradle state
 /.gradle/
 /.kotlin/
+/.cxx/
 /app/.cxx/
 /app/build/
 /build/
@@ -27,3 +28,22 @@ Thumbs.db
 
 # Release packages
 *.zip
+
+# ---------------------------------------------------------------------------
+# Port working area (port-x8u/). The documents and the scripts are shipped;
+# the raw dumps they were derived from are not -- they are machine captures,
+# not source, and the two POP sweeps alone are 63 MB.
+# ---------------------------------------------------------------------------
+/port-x8u/_diag/
+/port-x8u/_startup/
+/port-x8u/_logcat/
+/port-x8u/_rootprobe/
+/port-x8u/_devpull/
+
+# Superseded copy of port-x8u/_pristine/x8u-pristine-config (the verifier reads
+# the one under port-x8u/; keeping a second identical copy at the root only made
+# it ambiguous which one was authoritative).
+/x8u-pristine-config/
+
+# Assistant session state (project memory), never part of a release
+/.workbuddy/

@@ -14,7 +14,8 @@ import local.jiege.hook.common.Symbols;
  * ratios ("1x", "2x", ...), like a GR.
  *
  * ZoomSeekBar members are symbols (Zoom.*): the unit suffix (Zoom.unit, "mm" marks a millimetre
- * bar), the two cached label bitmaps, the label alphas and label-visible flag of its base class.
+ * bar), the cached label bitmaps (Zoom.labelBitmaps when present, else the named iconBitmap /
+ * labelBitmap pair), the label alphas and label-visible flag of its base class.
  * The writes are the ones the 1.2.4 port actually performed (its decompiler-alias field names
  * never existed and are left out).
  */
@@ -105,12 +106,26 @@ final class GrFocalLength {
         });
 
         // Cached label bitmaps are rebuilt, and labels stay fully opaque in GR.
+        //
+        // X8U port note: Zoom.labelBitmap is pinned by the obfuscated field name "I6", which on
+        // Find X8 Ultra 7.006.94 renamed to a Path (the Bitmap caches are now H6 and J6), so that
+        // symbol does not resolve there — and Symbols.set() only accepts a single-hit field, so
+        // the name cannot simply be relaxed. Zoom.labelBitmaps is a multi symbol matching every
+        // android.graphics.Bitmap field of ZoomSeekBar; nulling all of them is exactly "drop the
+        // label cache", and it holds on both devices. Fall back to the two named symbols on
+        // builds where the multi symbol is absent (i.e. an unpatched symbols.json).
         final XC_MethodHook dropLabelCache = new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (!isMillimetreBar(symbols, param.thisObject)) return;
                 try {
-                    symbols.set("Zoom.iconBitmap", param.thisObject, null);
-                    symbols.set("Zoom.labelBitmap", param.thisObject, null);
+                    if (symbols.has("Zoom.labelBitmaps")) {
+                        for (java.lang.reflect.Field cache : symbols.<java.lang.reflect.Field>all("Zoom.labelBitmaps")) {
+                            cache.set(param.thisObject, null);
+                        }
+                    } else {
+                        symbols.set("Zoom.iconBitmap", param.thisObject, null);
+                        symbols.set("Zoom.labelBitmap", param.thisObject, null);
+                    }
                 } catch (Throwable ignored) {
                 }
             }
