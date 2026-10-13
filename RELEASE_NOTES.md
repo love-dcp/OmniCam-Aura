@@ -41,7 +41,12 @@ Find X9 Ultra（PMA110，相机 7.006.77）共用同一个包，机型开机自�
 
 ## 已验证 / 待验证
 
-- 已验证：APK 编译、签名、无 UI Manifest、模块结构、GR/POP 后端、六组调色盘捕获配置；
-  **PMA110 与 PKJ110 均已实机安装并逐项走查**（GR、POP 全滤镜、移轴、X10 调色盘、滑杆、
-  0.6x 拍照、前置成片、缩略图跳转）。
-- 待验证：X8U 上的 Pro video ISZ（故意未启用）；其余 ColorOS 相机版本的兼容性。
+- 已验证（PMA110）：APK 编译、签名、无 UI Manifest、模块结构、GR/POP 后端与六组调色盘捕获配置；
+  已安装模块与 APK 并逐项使用。
+- 已验证（PKJ110）：模块与 APK 已实机安装；相机正常启动并稳定运行；**POP 模式可用，切到 POP
+  不再闪退，POP 的全部滤镜（含此前失效的「浓郁」）均生效**；GR 的符号层与原生 `getSettingInt`
+  指纹已按设备上的 `libAlgoInterface.so` 复核一致。
+- 待验证 / 已知限制：X8U 上的移轴、X10 调色盘、滑杆与前置成片尚未逐项走查（X10 调色盘还依赖
+  `libBasicTonePhotoX9/X10.so` 后端，按设计在 PKJ110 上不加载，因此默认不可用）；
+  X8U 的 ISP GR 调谐与 gamma 表（厂商调优工具才能生成）不在此次范围内；Pro video ISZ 故意
+  未在 X8U 上启用。完整的未决清单见 `port-x8u/README.md` 第 7 节。

@@ -2,8 +2,8 @@
 
 ![OmniCam Aura 图标](artwork/OmniCam-Aura.png)
 
-OPPO Find X9 Ultra（PMA110，相机 7.006.77）与 OPPO Find X8 Ultra（PKJ110，相机 7.006.94）的
-无界面 KernelSU 模块与 LSPosed 插件。同一个包在两台设备上通用，机型在开机时自动判定。
+OPPO Find X9 Ultra（PMA110，相机 7.006.77）与 OPPO Find X8 Ultra（PKJ110，相机 7.006.94／实机
+7.006.123）的无界面 KernelSU 模块与 LSPosed 插件。同一个包在两台设备上通用，机型在开机时自动判定。
 
 ## 功能
 

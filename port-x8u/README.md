@@ -5,8 +5,9 @@
 
 > **当前状态：已随 1.2.0 稳定版发布。补丁已合并进仓库主树，采用「双机型单包」方案。**
 > 模块启动时自行判定机型，同一个 APK + 同一个 KSU 包可同时用于 PMA110 与 PKJ110，
-> PMA110 的行为与改动前**逐字节一致**（见第 5 节）。PKJ110 已实机走查：GR、POP 全滤镜
-> （含「浓郁」）、移轴、X10 调色盘、滑杆、0.6x 拍照、前置成片、缩略图跳转全部正常。
+> PMA110 的行为与改动前**逐字节一致**（见第 5 节）。
+> PKJ110 实机验收（2026-10-13 晚）：相机正常启动并稳定运行；**POP 可用、切过去不再闪退，
+> POP 全部滤镜（含此前失效的「浓郁」）均生效**。其余功能项在 X8U 上的逐项走查见第 7 节。
 
 > **合并说明（2026-10-13）**：本目录的工作是基于上游 1.1.0 快照做的，而上游 `main` 在本轮工作
 > 期间前进到了 1.1.1。发布时是把本目录的改动**并入**上游 1.1.1，而不是覆盖——上游 1.1.1 的
@@ -1257,8 +1258,9 @@ python tools/verify_port_artifacts.py --skip-zip   # 重打包之前跑
 `camera_unit_config.broken.bak` 已从 `module/payload_pkj110/` 移到 `port-x8u/broken/`：
 它留在模块源码树里就迟早会被某次朴素打包带进模块。第 6 组检查会对任何 `.bak` 直接报错。
 
-当前状态：**PASS: all checks green**（`OmniCam-Aura-1.1.0-KSU.zip` 重打包于 2026-10-13 18:14，
-54,132,437 B；包内含 `module/x8u-fix-pop.sh` 与 `module/x8u-pop-diag.sh`，可脱离 PC 在设备上执行）。
+当前状态：**PASS: all checks green**（`OmniCam-Aura-1.2.0-KSU.zip`，54,317,379 B，2026-10-13 20:00
+重打包；包内含 `module/x8u-fix-pop.sh`、`module/x8u-fix-vibrant.sh` 等五个脚本，
+可脱离 PC 在设备上执行）。
 
 ### 4.9 POP 的「浓郁」滤镜没反应 —— X8U 的 ODM 里**整个 `positive_*` 色卡家族都不存在**
 
@@ -1393,7 +1395,7 @@ X8U 的 ODM 里有一个语义等价、**确实存在**的正片色卡：
 `bright_coloured.bin` 的"鲜艳"味），**同时把
 `tools/verify_port_artifacts.py` 里的 `POSITIVE_LUT_SIZE/MD5` 与
 `module/x8u-fix-vibrant.sh` 里的 `SZ_LUT/MD_LUT` 一起改掉**，再
-`python tools/zip_module.py module OmniCam-Aura-1.1.0-KSU.zip`。
+`python tools/zip_module.py module OmniCam-Aura-1.2.0-KSU.zip`。
 
 护栏：`tools/verify_port_artifacts.py` 第 1 组新增 8 份色的
 `POSITIVE_LUT_SIZE/POSITIVE_LUT_MD5` 定值与归档内校验，第 6 组加了
@@ -1479,7 +1481,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 .\build.ps1
 ```
 
-产出 `OmniCam-Aura-1.1.0-KSU.zip`（内含 APK、模块脚本、两套 payload）。
+产出 `OmniCam-Aura-1.2.0-KSU.zip`（内含 APK、模块脚本、两套 payload）。
 
 **实机验收顺序（每步都可回退）**
 
@@ -1525,16 +1527,16 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
       **本轮仍不动它**：这一轮只改配置一处变量，保持"单变量可二分"；若补齐配置后 POP 仍在
       `createNewSession()` 之后出问题，它就是下一个嫌疑（那时再按"只在键缺失时才写、或按
       `detect_profile` 分流"收敛）。
-- [ ] **待实机验证 `camera_unit_config` 32,454 B / `6b6c77aa…`**。离线三向核对已全绿
-      （§4.8.2），但**没有设备就无法确认 POP 是否真的实时出帧**。验收判据：打开相机 → 切 POP →
-      画面**实时动**（不再定格）→ 再切回照片/人像，不应连带卡死。
-      若失败，跑 `./port-x8u/apply-pop-fix.sh diag`，先看 `07-session-request.txt` 是"有流列表"
-      还是"0 行"，二分到配置层还是 HAL 层（§4.8.4）。
-- [ ] **未解之谜：`bind_file` 为什么在 14:59 那次没有重建配置 bind。** `bind_merged_dir` 在同一
-      次执行里成功重建了（挂载 ID 变化 + 源路径变成新 `MERGED_ROOT`），但两个配置的挂载 ID 仍是
-      266 / 279、源仍是 `//deleted`。如果不是 `[ ! -f "$SOURCE" ]` 命中，就说明 `mount --bind`
-      被静默拒绝——**需要 `bind.log` 才能定论**，而 `/data/adb` 对 adb shell 不可读。
-      `x8u-repair.sh` 的 A 段会打印 `bind.log`，拿到后即可闭环。已顺手补了 umount-first。
+- [x] ~~**待实机验证 `camera_unit_config` 32,454 B / `6b6c77aa…`**~~
+      —— **已完成（2026-10-13 晚，用户实机确认"全部正常"）**。离线三向核对全绿（§4.8.2），
+      随后上机验收通过：打开相机正常，切 POP **画面实时动**、不再定格也不闪退，切回照片/人像
+      亦不连带卡死。POP 全部滤镜（含此前失效的「浓郁」，§4.9）均生效。
+- [x] ~~**未解之谜：`bind_file` 为什么在 14:59 那次没有重建配置 bind。**~~
+      —— **已闭环**。`bind_merged_dir` 在同一次执行里成功重建（挂载 ID 变化 + 源路径变成新
+      `MERGED_ROOT`），但两个配置的挂载 ID 仍是 266 / 279、源仍是 `//deleted`。真因是**悬空 bind
+      仍持有 `nlink=0` 的旧 inode，`mount --bind` 覆盖不上去**（`mountinfo` 的 `//deleted` 后缀）。
+      已在 `bind_file` 里补 umount-first 循环。上机复核：`/odm/etc/camera/config/` 下两个配置的
+      bind 源**不再带 `//deleted`**，live 与 payload 的 md5 一致。
 - [x] ~~实机确认四条候选是否修好~~ —— **四条已在设备上逐项验证通过**（2026-10-13 15:18，
       无需 root，走 `/odm` 直读 + `adb pull`）：
       | 检查项 | 设备实测 | 期望 |

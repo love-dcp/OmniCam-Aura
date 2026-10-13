@@ -5,7 +5,10 @@
 | 机型 | 代号 | 相机版本 | 状态 |
 |---|---|---|---|
 | OPPO Find X9 Ultra | PMA110 | 7.006.77 | 已验证 |
-| OPPO Find X8 Ultra | PKJ110 | 7.006.94 | 已验证 |
+| OPPO Find X8 Ultra | PKJ110 | 移植依据 7.006.94；实机 7.006.123 | 已验证 |
+
+> PKJ110 的两个版本号都经过核对：原生指纹键控的是 `libAlgoInterface.so`（ODM 固件，不随相机
+> APK 版本走），`symbols.json` 在实机 7.006.123 上 190/191 命中。详见 `../port-x8u/README.md` §5、§7。
 
 模块启动时会自行判定机型，同一个包可直接在两台设备上使用，判断结果显示在模块目录下的
 `mount.log` 与 `bind.log` 里（`profile=PMA110` 或 `profile=PKJ110`）。
