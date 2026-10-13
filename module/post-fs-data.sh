@@ -5,10 +5,9 @@
 # reasoning). Both profiles are marked [PMA110] / [PKJ110] below.
 #
 #   PMA110 (Find X9 Ultra) - payload/          , the full OmniCam config set, ISP + gamma bound.
-#   PKJ110 (Find X8 Ultra) - payload_pkj110/   , the two regenerated config files plus the
-#                           synthesised oplus_camera_feature_config (the OCS parse-version-2
-#                           container that turns the palette on); the encrypted oplus_* configs
-#                           and the per-sensor ISP/gamma files are deliberately left alone.
+#   PKJ110 (Find X8 Ultra) - payload_pkj110/   , only the two regenerated config files; the
+#                           encrypted oplus_* configs and the per-sensor ISP/gamma files are
+#                           deliberately left alone.
 MODDIR=${0%/*}
 LOG=$MODDIR/bind.log
 # Scratch space for the merged trees that get bind-mounted over /odm/etc/camera/*. It must sit
@@ -166,42 +165,14 @@ for NAME in oplus_camera_config oplus_camera_algo_switch_config oplus_camera_aps
     [ "$PROFILE" = PMA110 ] || continue
     bind_file "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"
 done
-if [ "$PROFILE" = PMA110 ]; then
-    for NAME in camera_unit_config camera_unit_feature_config.protobuf; do
-        bind_file "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"
-    done
-else
-    # [PKJ110] The config directory has to be merged rather than bound file-by-file, because
-    # oplus_camera_feature_config is a file the stock /odm does NOT have and /odm is erofs
-    # read-only, so there is no target to bind onto (bind_file skips absent targets).
-    #
-    # oplus_camera_feature_config is the OCS "config parse version 2" container. Version 2 is what
-    # makes every com.oplus.feature.* project-support key resolvable at all:
-    #   ProtobufConfigureHelper.getParseVersion()
-    #       = isFileNotEmpty("/odm/etc/camera/config/oplus_camera_feature_config") ? 2 : 1
-    #   CameraConfigure.getProjectSupportFeatureValue(key)
-    #       = (parseVersion != 1) ? sVendorTagMap.get(key) : null      // null for every key on v1
-    #   Lut3dDataManager.paletteMode(scene)
-    #       = CameraConfig.d("com.oplus.feature.color.palette.support", false, false) && scene in
-    #         {common, portrait, night}
-    # X8U ships version 1 only, so paletteMode() is permanently false and the palette never
-    # appears even though the whole ipuapi palette stack (PalettePanelView, PaletteProcessUnit,
-    # applyPaletteCaptureEnable) and this module's hooks are already in place. tools/
-    # build_feature_config_v2.py synthesises the version-2 container out of payload_pkj110's own
-    # camera_unit_feature_config.protobuf: the FeatureTable is carried over byte-identical as
-    # tag 2, and tag 1 (the vendor-tag map) declares only the palette key. Keys that are absent
-    # from that map still resolve to null, so every other com.oplus.feature.* lookup keeps
-    # exactly the behaviour it had on the version-1 path.
-    CONFIG_EXTRA=$MERGED_ROOT/config_extra
-    rm -rf "$CONFIG_EXTRA"
-    mkdir -p "$CONFIG_EXTRA"
-    for NAME in camera_unit_config camera_unit_feature_config.protobuf oplus_camera_feature_config; do
-        [ -f "$CONFIG_SRC/$NAME" ] || { log "config extra missing $NAME"; continue; }
-        cp -a "$CONFIG_SRC/$NAME" "$CONFIG_EXTRA/$NAME" 2>>"$LOG" || log "config extra copy FAIL $NAME"
-    done
-    bind_merged_dir /odm/etc/camera/config "$CONFIG_EXTRA" "$MERGED_ROOT" config /odm/etc/camera/config
-    log "feature_v2=$(ls -l /odm/etc/camera/config/oplus_camera_feature_config 2>&1)"
-fi
+# Both profiles bind the same two files. The config directory is deliberately NOT merged: 1.3.0
+# merged it to carry a synthesised OCS "config parse version 2" container
+# (oplus_camera_feature_config), which turned out to deadlock the camera on the first feature
+# lookup -- see local.jiege.hook.x10.PaletteFeatureSwitch. The palette switch is answered in Java
+# now, so nothing extra belongs in this directory.
+for NAME in camera_unit_config camera_unit_feature_config.protobuf; do
+    bind_file "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"
+done
 
 bind_merged_dir /odm/etc/camera/meishe_lut "$MODDIR/payload/meishe_lut" "$MERGED_ROOT" meishe_lut /odm/etc/camera/meishe_lut
 

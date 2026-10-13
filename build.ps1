@@ -23,6 +23,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'gradle build failed' }
     } finally { Pop-Location }
 } finally { subst "$($drive):" /D }
+# Old release APKs linger in module/ across version bumps and zip_module.py sweeps the whole
+# directory into the archive, so a 1.3.1 package would silently ship the 1.3.0 APK as well (which
+# verify_aura.py then rejects). Drop every Aura APK first: the archive may only ever hold the one
+# we are about to build.
+Get-ChildItem -LiteralPath (Join-Path $project 'module') -Filter 'omnicam-aura-*.apk' -File |
+    Remove-Item -Force -ErrorAction Stop
 Copy-Item -LiteralPath (Join-Path $project 'app/build/outputs/apk/release/app-release.apk') -Destination (Join-Path $project "module/$apkName") -ErrorAction Stop
 & $python (Join-Path $project 'tools/zip_module.py') (Join-Path $project 'module') $archive
 if ($LASTEXITCODE -ne 0) { throw 'module packaging failed' }
