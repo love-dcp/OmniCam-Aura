@@ -11,7 +11,7 @@
 #     * KernelSU 的 metamount 不会重建 /odm/lib64 的 overlay，它会一直冻结在
 #       /mnt/vendor/mountify/odm/lib64 第一次生成时的内容（也就是 X9U 的后端库）；
 #     * 模块的 system/ 里早就没有这三个库了，但 overlay 不重建就永远看不到这一点。
-#   本脚本以 root 身份把 overlay 拆掉、把工作区里的 X9U 库删掉、并重绑两个配置文件。
+#   本脚本以 root 身份把 overlay 拆掉、把工作区里的 X9U 库删掉、并重绑三个配置文件。
 #
 # ---------------------------------------------------------------------------
 # 【安全边界 —— 本脚本绝对不会做的事】（重要，请读完再执行）
@@ -171,9 +171,9 @@ ls -la "$WS" 2>&1
 
 echo
 echo "=============================================================="
-echo " D. 重绑两个配置文件（撤掉陈旧 bind，绑模块里的新版本）"
+echo " D. 重绑三个配置文件（撤掉陈旧 bind，绑模块里的新版本）"
 echo "=============================================================="
-for N in camera_unit_config camera_unit_feature_config.protobuf; do
+for N in camera_unit_config camera_unit_feature_config.protobuf oplus_camera_algo_switch_config; do
     say "--- $N ---"
     while :; do
         TOPS=$(top_mount "$CFG/$N")
@@ -212,14 +212,16 @@ for N in camera_unit_config camera_unit_feature_config.protobuf; do
 done
 echo
 say "--- 处理后设备实际提供的配置 ---"
-ls -la "$CFG/camera_unit_config" "$CFG/camera_unit_feature_config.protobuf" 2>&1
-for N in camera_unit_config camera_unit_feature_config.protobuf; do
+ls -la "$CFG/camera_unit_config" "$CFG/camera_unit_feature_config.protobuf" \
+       "$CFG/oplus_camera_algo_switch_config" 2>&1
+for N in camera_unit_config camera_unit_feature_config.protobuf oplus_camera_algo_switch_config; do
     if [ -f "$CFG/$N" ]; then
         say "$N md5 = $(md5sum "$CFG/$N" 2>/dev/null | cut -d' ' -f1)"
     fi
 done
-say "期望 camera_unit_config = 29803 B / 17290f6029609c7379ee50e5b7c7c02b"
-say "期望 protobuf          = 62004 B / 02fe70319b379a5c678830025b321c11"
+say "期望 camera_unit_config            = 32454 B / 6b6c77aa8694bd55d2eaaacaec5a659a"
+say "期望 protobuf                      = 62330 B / b0ee50c1a3bbc9e1dcc20f2391a490c2"
+say "期望 oplus_camera_algo_switch_config = 141474 B / 593dbc7913682da175663d708b005120"
 
 echo
 echo "=============================================================="

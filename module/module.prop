@@ -1,6 +1,6 @@
 id=omnicam_aura
 name=OmniCam Aura
-version=1.3.2
-versionCode=8
+version=1.3.3
+versionCode=9
 author=local-port
 description=RICOH GR, POP and Find X10 feature completion for PMA110 (Find X9 Ultra) and PKJ110 (Find X8 Ultra), both verified. Headless LSPosed companion. Device profile is detected at boot; see mount.log and bind.log.

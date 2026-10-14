@@ -3,7 +3,7 @@
 
 Runs entirely offline. Checks, in order:
 
-  1. Pinned hashes    -- the four PKJ110/PMA110 payload files are the reviewed bytes.
+  1. Pinned hashes    -- the PKJ110/PMA110 payload files are the reviewed bytes.
   2. Mirror equality   -- port-x8u/payload/ (the delivered copy) == module/payload_pkj110/.
                           This file used to be updated by hand and kept serving the deformed
                           camera_unit_config long after the module payload was repaired, so it
@@ -11,6 +11,9 @@ Runs entirely offline. Checks, in order:
   3. JSON shape        -- tools/verify_payload_json.py (pair-list deformation, exit 0).
   4. Semantic diff     -- the PKJ110 camera_unit_config is X8U's stock config plus exactly the
                           nine expected X9U-derived entries; nothing native is changed or dropped.
+                          The same group rebuilds oplus_camera_algo_switch_config and requires it
+                          to be the device's stock text plus the two retroCamera appends, and
+                          that both the module payload and the delivered mirror hold those bytes.
   5. Native fingerprint-- libAlgoInterface.so still matches the getSettingInt prologue used by
                           app/src/main/cpp/gr_basictone.cpp (guards the GR native hook).
   6. Module archive    -- the KernelSU zip carries the same payload bytes, the same
@@ -46,6 +49,13 @@ PKJ110_PAYLOAD = {
         62330,
         "b0ee50c1a3bbc9e1dcc20f2391a490c2",
     ),
+    # Not a copy of PMA110's file: the device's own decoded stock text with the retroCamera block
+    # appended, so the payload stays "stock plus pure appends" like every other ported config.
+    # Rebuilt by tools/build_x8u_algo_switch_config.py; see README section 4.12.
+    "oplus_camera_algo_switch_config": (
+        141474,
+        "593dbc7913682da175663d708b005120",
+    ),
 }
 # X9U payload must stay untouched by PKJ110 work.
 PMA110_PAYLOAD = {
@@ -59,7 +69,7 @@ PMA110_PAYLOAD = {
     ),
 }
 MODULE_SCRIPTS = {
-    "post-fs-data.sh": (14184, "79e5232f9e214d8b3303cd185de46ac1"),
+    "post-fs-data.sh": (15176, "95706093c62104f0e7e1d736e5f7ab3f"),
     "service.sh": (6798, "4a71d4eead6cefba07c3d3f09e1ed74d"),
     "post-mount.sh": (6620, "6d2dbca7d873093e2cd83f832da0bc3d"),
     # Device-side repair/diagnostics for the POP regression; shipped so the fix can also be
@@ -70,7 +80,7 @@ MODULE_SCRIPTS = {
     # Kept in the package for the same reason: recovering a device that has already been
     # broken by an earlier build must not require a PC. Neither is run at boot.
     "x8u-config-revert.sh": (10649, "ede8a228760118c59599fcf03d476d1d"),
-    "x8u-repair.sh": (9564, "973f77fef1aee4ab2808432050be44bf"),
+    "x8u-repair.sh": (9790, "8d6514d87990ec4ee6c2fa2f84fb5014"),
 }
 
 # The POP "Vibrant" filter -- camera_filter_retro_vibrant_dsc ("Positive" / 浓郁, film hint
@@ -278,7 +288,7 @@ def walk(port, stock, template, path, added, changed, removed):
 
 
 def check_semantics():
-    print("[4/6] semantic diff of camera_unit_config")
+    print("[4/6] semantic diff of the ported configs")
     port = load(os.path.join(REPO, "module", "payload_pkj110", "camera_unit_config"))
     stock = load(os.path.join(REPO, "port-x8u", "_pristine", "x8u-pristine-config", "camera_unit_config"))
     template = load(os.path.join(REPO, "module", "payload", "camera_unit_config"))
@@ -314,6 +324,58 @@ def check_semantics():
     check("usecase_info/retro_camera_case reaches the parser last (branch order preserved)",
           list(port["usecase_info"])[-1] == "retro_camera_case",
           "last=%s" % list(port["usecase_info"])[-1])
+
+    check_algo_config()
+
+
+# ---------------------------------------------------------------------------
+# 4b. oplus_camera_algo_switch_config -- stock text plus pure appends
+# ---------------------------------------------------------------------------
+def load_builder():
+    import importlib.util
+
+    path = os.path.join(REPO, "tools", "build_x8u_algo_switch_config.py")
+    spec = importlib.util.spec_from_file_location("_x8u_algo_builder", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_algo_config():
+    print("      (oplus_camera_algo_switch_config: stock text + two retroCamera appends)")
+    builder = load_builder()
+
+    text, problems, notes = builder.build_text()
+    check("rebuild deviates from the stock base in nothing but the appends",
+          not problems, str(problems[:4]))
+    for section, kept, pruned in notes:
+        if pruned:
+            note("%s kept %d keys per entity; pruned X9U-only %s"
+                 % (section, kept, ", ".join(pruned)))
+
+    rebuilt = text.encode("utf-8")
+    for base in ("module/payload_pkj110", "port-x8u/payload"):
+        path = os.path.join(REPO, base, "oplus_camera_algo_switch_config")
+        if not os.path.isfile(path):
+            check("exists %s/oplus_camera_algo_switch_config" % base, False)
+            continue
+        with open(path, "rb") as handle:
+            check("algo config %s == rebuild" % base, handle.read() == rebuilt)
+
+    stock_text = builder.load_stock()[0].encode("utf-8")
+    with open(os.path.join(REPO, "module", "payload_pkj110",
+                           "oplus_camera_algo_switch_config"), "rb") as handle:
+        payload = handle.read()
+    # The appends sit inside the file, one per section, so only the prefix ahead of the first one
+    # and the tail of the file can be asserted byte for byte. The rebuild comparison above is the
+    # strong check; these two say the stock bytes around the appends were not rewritten.
+    anchor = stock_text.index(b'\n    ],\n    "aps_preview_configs"')
+    check("stock text ahead of the first append is byte-identical",
+          payload.startswith(stock_text[:anchor]))
+    check("stock tail is byte-identical", payload.endswith(b"\n    ]\n}\n"))
+    check("exactly two mode blocks were appended",
+          payload.count(b'"mode"') == stock_text.count(b'"mode"') + 2,
+          "%d vs %d" % (payload.count(b'"mode"'), stock_text.count(b'"mode"') + 2))
 
 
 # ---------------------------------------------------------------------------

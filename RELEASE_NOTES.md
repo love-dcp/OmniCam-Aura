@@ -1,4 +1,41 @@
-# OmniCam Aura 1.3.2
+# OmniCam Aura 1.3.3
+
+无界面相机模块。在既有的 Find X9 Ultra（PMA110，相机 7.006.77）与 Find X8 Ultra
+（PKJ110，相机 7.006.94 / 实机 7.006.123）支持之上，**1.3.3 修好 POP（复古相机）模式的快门**
+——此前要点快门毫无反应（预览正常、滤镜正常，就是不出片）。
+
+## 本次变更（1.3.3 · PKJ110 的 POP 快门修复）
+
+- **症状**：PKJ110 上进入 POP（`retroCamera`）后点快门（屏幕快门与硬件相机键都是）**毫无反应**。
+  预览正常、色卡正常，`is_export,true` 从不出现。照片模式一切正常。
+- **根因（APS 配置缺口，不是模式类钩子）**：相机把 `<mode>@<cameraId>` 拿去
+  `AlgoSwitchConfig.sPreviewConfigMap` 里查，查不到就让 APS 不给该模式任何预览结果。
+  PKJ110 的 `/odm/etc/camera/config/oplus_camera_algo_switch_config` 用的是 X8U 原厂那份，
+  全表 **60 个键里没有 `retroCamera`**（也没有 `grmode`）。于是 `getPreviewConfig("retroCamera",0,…)`
+  返回 `null`（`ApsAdapterLog.e "getPreviewConfig, preview config is null"`，POP 模式 33 次、
+  照片 0 次），`bb.g` 全部停在构造默认值（相机 ID `-1`、特性类型 `0`、滤镜名 `null`），
+  最后 `BaseMode.m8` 的尾句 `return gVar.b == getCameraId()` 落到 `-1 == 0` ⇒ 恒 false，快门被拦。
+- **为什么 GR 没事**：`GrModeHooks` 让 GR 冒充 `professional`，走的是 `master@0` 那套现成配置；
+  POP 的移植只做了 UI / 色卡 / mask，**没做"让 POP 落到一个 APS 认识的 mode 上"这一步**。
+- **修复方式：从设备原厂明文重建这份配置，纯追加 `retroCamera` 块**（不是照搬 X9U 那份全模式表）。
+  - 用临时探针 dump 出设备原厂配置**解密后的明文**（132,973 B，**JSONC**，带两处 `//` 注释）。
+  - `tools/build_x8u_algo_switch_config.py` 在这份明文上做**文本级 splice**，
+    追加的 `retroCamera` 条目按 X8U 的词汇表**裁剪**（去掉 `aps_algo_colorsensor` /
+    `aps_algo_dcg_fusion` / `aps_algo_rsp` 等 X8U 没有的算法开关，保留 `aps_algo_color_palette`），
+    并还原原厂排版。
+  - 产物 **141,474 B / md5 `593dbc7913682da175663d708b005120`**，同时写入
+    `module/payload_pkj110/`（下发）与 `port-x8u/payload/`（交付镜像，逐字节相同）。
+  - `module/post-fs-data.sh` 对 PKJ110 **无条件** bind 这个文件（它原先只在 PMA110 分支里被跳过）。
+- **发布闸门**：`tools/verify_port_artifacts.py` 新增一组（4b）——动态载入生成器重建、两个镜像等值、
+  产物与**原厂文本前缀逐字节一致**、尾部一致、`"mode"` 恰好多 2 个。`python tools/verify_port_artifacts.py`
+  与 `python tools/verify_aura.py` 均 PASS。
+- **实机验证**（PKJ110，相机 7.006.123）：POP 出片 ✅、照片 ✅、大师 ✅ 三模式回归通过，
+  `preview config is null` **33 → 0**。终验是在**模块自身完成 bind**的情况下做的（非手工 mount），
+  即装包开机后自动生效。详见 `port-x8u/README.md` §4.12。
+
+## 历史（1.3.2 · PKJ110 调色盘开关撤回）
+
+> 1.3.2 的结论仍然有效（调色盘不能在 Java 层开启），本节保留原样。
 
 无界面相机模块。在既有的 Find X9 Ultra（PMA110，相机 7.006.77）与 Find X8 Ultra
 （PKJ110，相机 7.006.94 / 实机 7.006.123）支持之上，**1.3.2 撤回 X8U 的调色盘开关**：

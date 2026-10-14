@@ -3,6 +3,9 @@
 目标机：**PKJ110**，相机 `com.oplus.camera` **7.006.94**，相册 `com.coloros.gallery3d` **17.9.24**。
 基准机：PMA110，相机 7.006.77（本仓库原始目标）。
 
+> 上游项目 OmniCam Aura 由 **苯宝宝是个醚**（GitHub: [benbaobaoshigemi](https://github.com/benbaobaoshigemi)）
+> 原创并开源；本移植包在其基础上做 PKJ110 适配。
+
 > **当前状态：已随 1.2.0 稳定版发布。补丁已合并进仓库主树，采用「双机型单包」方案。**
 > 模块启动时自行判定机型，同一个 APK + 同一个 KSU 包可同时用于 PMA110 与 PKJ110，
 > PMA110 的行为与改动前**逐字节一致**（见第 5 节）。
@@ -1333,8 +1336,8 @@ positive_hdr_master_a_1.bin / _d_1.bin     PRO_FILTER_TYPE_POSITIVE_HDR_PATH
 
 这不是本移植引入的文件，是**这台机器的固件从来没给过**：
 
-- 实机 `su -c 'find / -name "positive*"'` → **0 命中**（整机，含 `/odm` 与 OPPO 自家
-  `OPCameraPro` 那套 `custom_lut/system/` 共 500+ 个第三方色卡）；
+- 实机 `su -c 'find / -name "positive*"'` → **0 命中**（整机范围，含 `/odm` 与 OPPO 自家
+  `OPCameraPro` 的 `custom_lut/system/`，那里另有 500+ 条色卡，同样一条 `positive_*` 都没有）；
 - 出厂 F.21 `odm.img`（EROFS，3.36 GB）用 `_meta/erofs_dir.py` 读出
   `/etc/camera/meishe_lut` 共 **111 个条目**，逐条核对 **无一条 `positive_*`**；
 - 同一个目录里 `portra400_*` 与 `blackandwhite_HC_*` 的"更新版"家族是**齐的**
@@ -1770,6 +1773,222 @@ signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0000000000000020 (read)
 
 ---
 
+### 4.11 POP 点快门不出片（**第四个独立根因**，2026-10-14 定案）：APS 的预览配置里没有 `retroCamera`
+
+§4.9 修好的是「浓郁」色卡；§4.5–4.7 修好的是 POP 能进、能预览。仍然存在的症状是
+**点快门毫无反应**（屏幕快门与硬件相机键都一样，预览正常、滤镜正常、`is_export,true` 从不出现）。
+
+#### 4.11.1 判定方法：`BaseMode.m8()` 上挂探针（`XposedBridge.log`，不走 logcat）
+
+`BaseMode.m8(bb.g, boolean, boolean)` 是拍照前的最后一道总闸，5 个出口里 3 个走 `ab.a.j`(Log.e)
+可见、2 个走 `ab.a.t`/`g`（**`ab.a` 的静态位 `b` 恒 false**，见 §4.11.5）静默。
+所以只能上探针：`app/src/main/java/local/jiege/hook/pop/PopShutterProbe.java`（**临时文件**，
+`PopPort.installCamera` 末尾一行 `Log.guard(TAG,"POP shutter probe",…)` 拉起；收尾时一并删）。
+
+实测（POP vs 照片，同一台机、同一支镜头）：
+
+| 观测项 | POP（`fm.y1`） | 照片（`fm.v1`） |
+|---|---|---|
+| `m8` 返回值 | **false** | **true** |
+| `L4()`（= ModeUi.filterType） | `"polaroid_sdr.mslut"` | `"default"` |
+| `bb.g.d`（APS 给的滤镜名） | **null** | `"default"` |
+| `bb.g.b`（`PREVIEW_RESULT_CAMERA_ID`） | **-1** | 0 |
+| `bb.g.q`（`PREVIEW_RESULT_FEATURE_TYPE`） | **0** | 61 |
+| `bb.g.T0`（`PREVIEW_RESULT_LIVEPHOTO_ENABLE`） | **-1** | 0 |
+| `logcat: getPreviewConfig, preview config is null` | **33 次** | 0 次 |
+| 实际出片 | ❌ | ✅ |
+
+#### 4.11.2 因果链
+
+```
+PKJ110 的 /odm/etc/camera/config/oplus_camera_algo_switch_config = X8U 原厂加密容器
+        （132984 B，`01 01` 头 + 高熵块；X9U payload 那份是明文 JSON 109976 B）
+   ↓ post-fs-data.sh 对 PKJ110 显式 `continue`，这四个 oplus_* 一律不 bind
+AlgoSwitchConfig.initialize(ctx)
+   → UpdateHelper.getValidConfigData(ctx, "oplus_camera_algo_switch_config")
+   → getConfigString()：OplusStringJNI.needGetString() 为假时**按 UTF-8 直接当 JSON 解析**
+   → parseConfigData() 填 sPreviewConfigMap（键 = "<mode>@<cameraId>"）
+   ↓ 实测映射表 60 个键：4kVideo/aiEnhancement/aiHighPixel/common/commonDummy/commonSatHal/
+     commonVideo/…/master/microscope/movie/night/panorama/portrait/sticker/xpan … 
+     **没有 retroCamera（也没有 grmode）**
+相机请求 `retroCamera@0` ⇒ AlgoSwitchConfig.getPreviewConfig(...) = null
+   ↓
+APS 不为 POP 产出任何预览结果 ⇒ bb.g 全部停在构造默认值
+   ↓
+BaseMode.m8 依次撞两处（两处都实测到）：
+  ① `this instanceof fm.y1` 的滤镜一致性闸门
+     strL4 = L4() = "polaroid_sdr.mslut"；str2 = isEmpty(d) ? "default" : d = "default"
+     ⇒ 两个 TextUtils.equals 全不等 ⇒ return false
+  ② 闸门放行后（把 d 对齐成 L4() 再跑）走到尾句
+     `if (Pc(gVar)) return gVar.b == getCameraId();`
+     b = -1、getCameraId() = 0 ⇒ return false
+```
+
+`bb.g` 的每个字段都是 OCS 预览结果键（`bb.g.v6(CameraPreviewResult,boolean)` 里现场 `new`
+`PreviewResultKey` 逐个取）：`b`←`PREVIEW_RESULT_CAMERA_ID`、`d`←**`"com.oplus.preview.filter_type"`**、
+`e`←`PREVIEW_RESULT_ERROR_CODE`、`q`←`PREVIEW_RESULT_FEATURE_TYPE`、
+`T0`←`PREVIEW_RESULT_LIVEPHOTO_ENABLE`、`Z0`←`KEY_PREVIEW_RESULT_CAMERA_MODE`。
+**POP 下全是默认值 ⇒ 一句话：APS 对 POP 一个预览结果都没给。**
+`Pc(bb.g)`（`BaseMode.java:3168`）只在 `q ∈ {73,92,97} && T0 != -1` 时才为 false，POP 的
+`q=0 T0=-1` ⇒ `Pc=true` ⇒ 必然走 `b == getCameraId()`。
+
+#### 4.11.3 为什么 GR 没事、POP 有事（这条解释了"POP 是拍照模式的子类"）
+
+`fm/y1`(POP) 与 `fm/v1`(照片) 都直接继承 `dm/w2`(=`CommonCapMode`)，是**兄弟**，不是父子；
+POP 多出来的只有 `m8` 里那段 `this instanceof fm.y1`（以及 `Jg` 里同内容、但由 `s3` 门控、
+只在换滤镜时跑、不拦拍照的那段）。真正让 GR 能用的是**另一件事**：
+
+- 映射表缺的两个 mode 恰好就是**被移植的两个**：`retroCamera` 与 `grmode`。
+- `GrModeHooks` 让 GR **冒充 professional**（`CameraEntry.enter` 把 `"gr"` 换成 `"professional"`，
+  再继承 `ProMode` 的方法与 `getSupportFunction`）⇒ GR 走的是 `master@0` 那套现成 APS 配置，
+  根本不需要 `grmode`。
+- POP 的移植只做了 UI/色卡/mask（`PopResources` / `PopInverseMaskProgram` / `PopHighPixel` …），
+  **没做"让 POP 落到一个 APS 认识的 mode 上"这一步**。
+
+#### 4.11.4 两条修法（**路线 B 已实施，见 §4.12**）
+
+> **2026-10-14 更新**：下面两条里，**路线 B 已落地**（用设备原厂明文重建 + 纯追加 `retroCamera`，
+> 实机验证 POP 出片）。完整做法、生成器与闸门见 **§4.12**。
+> 路线 A（Java 侧兜底）**未采用**，保留在此作为备选。
+
+- **A：Java 侧兜底（GR 同款思路，不碰盘）** —— 钩
+  `com.oplus.ocs.camera.consumer.apsAdapter.config.AlgoSwitchConfig.getPreviewConfig`，
+  当 `mode == "retroCamera"` 时回退到某个存在的 `PreviewConfig`（如 `master@<id>`/`common@<id>`）；
+  再处理 ①（`d==null` 时对齐 `L4()`，或改成"APS 未表态即放行"）。
+  可逆、作用域仅限该 mode。**待验证**：`b`/`q`/`T0` 是否因此变正常。
+- **B：配置侧** —— 给 PKJ110 造一份含 `retroCamera` 的 `oplus_camera_algo_switch_config`。
+  ⚠️ §7 里"需要先解决解密"这句**已被本轮修正**：SDK 的 `getConfigString()` 在
+  `needGetString()` 为假时**按明文 UTF-8 读**，所以**明文 JSON 是被接受的**，理论上直接 bind
+  X9U 那份即可。但它同时是 `aps_capture_configs` 的全模式表（23 个 mode），
+  **会改变所有模式的 APS 行为**，且 X9U 的 `file_version=16.001 / aps_version=6 / aps_mode=1`
+  与 X8U 加密版是否同代未知。要动就得整机全模式回归，并按纪律同步
+  `tools/verify_port_artifacts.py` 定值与本文档新增一节。
+  ⚠️ §4.10 的教训（往盘上补容器把相机锁死）在此同样适用。
+
+#### 4.11.5 两条排障纪律（本轮踩过，写下来免得再踩）
+
+1. **LSPosed 模块代码来自"已安装的 App"**，不是 KSU 模块目录里的 APK：
+   `/proc/<pid>/maps` 指向 `/data/app/~~*/local.omnicam.aura-*/base.apk`。
+   改完钩子必须 `adb install -r module/omnicam-aura-<版本>.apk`（同 debug 证书，直接过），
+   只换 `/data/adb/modules/omnicam_aura/*.apk` **不生效** —— 上一轮"探针没有日志"就是这个，
+   不是日志读不到。
+2. `ab/a` 的门控（`classes*.dex` `<clinit>`）：`b=true、c..m=false`，
+   而 `c` 是全工程唯一写入点且恒 false ⇒ `initLog` 里 `b = c` ⇒ **`b` 恒 false** ⇒
+   `ab.a.t`(Log.i)、`ab.a.g`(Log.d)、`ab.a.E`(Log.v) 在这台机器上**永远静默**；
+   只有 `ab.a.j`(Log.e)、`ab.a.L`(Log.w) 可见。**"日志里没有"不等于"没发生"** —— 必须加探针。
+   设备侧读 LSPosed 日志：`su -c 'cp /data/adb/lspd/log/modules_*.log /sdcard/Download/x.txt'`
+   再 `adb pull`（直读 `/data/adb/...` 会被 mode `-rwxrwx---` 挡）。
+
+---
+
+### 4.12 §4.11 的修法落地：PKJ110 的 `oplus_camera_algo_switch_config` 从**设备原厂明文**重建（1.3.3）
+
+§4.11.4 的**路线 B** 已实施。缺口很明确：PKJ110 出厂那份
+`oplus_camera_algo_switch_config` 里**没有 `retroCamera`**，所以 POP 拿不到 APS 预览配置。
+补上它、且**只补它**，POP 的快门就能正常触发。
+
+#### 4.12.1 缺口定位：原厂表里没有 `retroCamera`
+
+- PKJ110 出厂那份配置（`/odm/etc/camera/config/oplus_camera_algo_switch_config`）的
+  `aps_capture_configs` / `aps_preview_configs` 里**不含 `retroCamera`**（也不含 `grmode`）。
+- GR 之所以能用，是因为 `GrModeHooks` 让 GR **冒充 `professional`**（见 §4.11.3），走的是
+  `master@0` 那套现成配置，根本不需要 `grmode`。POP 没有这层伪装。
+- **A/B 实证（决定性）**：把一份**只比原厂多 `retroCamera`** 的同名配置 bind 到
+  `/odm/etc/camera/config/oplus_camera_algo_switch_config`，`am force-stop` 后重开相机 ⇒
+  POP 出片（`IMG20261014100815.jpg`），`ApsAdapterLog.e "getPreviewConfig, preview config is null"`
+  **33 → 0**；照片、大师同时正常 ⇒ **差异确实只有这一个 mode 条目**，与模式类钩子、符号表、
+  运行时库都无关。
+
+#### 4.12.2 为什么是“纯追加”，而不是搬 X9U 那份
+
+**不是**把 X9U（PMA110）那份配置文件直接拿来用，原因有二：
+
+1. X9U 那份是 `aps_capture_configs` 的**全模式表**（23 个 mode），整份搬过来会**改变本机所有
+   模式的 APS 行为**，风险面远超 POP 本身，要动就得整机全模式回归。
+2. X9U 的 `file_version` / `aps_version` / `aps_mode` 与本机那份是否同代未知。
+
+为了让产物**可复现、可审计、且只含我们真的想加的东西**，改为在**设备自己的原厂明文**上做追加：
+
+1. 用临时探针 `ConfigDumpProbe`（hook `UpdateHelper.getValidConfigData(Context, String)` 的
+   `afterHookedMethod`，把返回值写到 `/data/user/0/com.oplus.camera/files/config_dump/<name>.json`）
+   dump 出**设备自己那份配置解密后的明文**；
+2. 在这份**明文文本**上**纯追加** `retroCamera` 块，并把追加块按 X8U 自己的词汇表裁剪
+   （见 §4.12.3）。
+
+dump 出来的原厂明文：**132,973 B，是 JSONC**（带两处 `//` 注释，例如
+`"aps_version" : 6,  // 2: aps2.0 platfrom; ...`），模式集合 21/36。磁盘上那份 132,984 B 的同名文件
+是加密容器（`01 01` 头），**逐字节不同**。⇒ 又一次印证 §4.1 的纪律：**只做文本级 splice，
+绝不重新序列化**。
+
+#### 4.12.3 生成器 `tools/build_x8u_algo_switch_config.py`
+
+```
+基底   port-x8u/_pristine/x8u-pristine-config/oplus_camera_algo_switch_config   （唯一接受的基底）
+模板   module/payload/oplus_camera_algo_switch_config                            （X9U 的 retroCamera 块）
+产物   module/payload_pkj110/oplus_camera_algo_switch_config  +  port-x8u/payload/ 镜像
+```
+
+- `strip_jsonc()` 剥掉 `//`、`/* */` 与尾逗号，再用 `json.loads(..., object_pairs_hook=OrderedDict)`
+  保序解析（原厂文件本身不是合法 JSON）。
+- **词汇表裁剪**：`vocabulary(section)` 收集该 section 里所有 dict key 名与 `algo_list` 里的算法名；
+  `prune()` 丢掉 X8U 不认识的 key、过滤 `algo_list` 里 X8U 不认识的算法名。实测裁掉
+  `aps_algo_colorsensor` / `aps_algo_dcg_fusion` / `aps_algo_rsp`（capture 两个 entity 各若干），
+  **保留** `aps_algo_color_palette`（X8U 原厂有这个词）。这样 `retroCamera` 只说 X8U 听得懂的话。
+- **排版还原**（否则 diff 会炸）：`aps_capture_configs` 用 ` : `、`aps_preview_configs` 用 `: `；
+  标量数组写 `[ a, b ]`；缩进 4 空格；追加块整体再加 8 列；插入点取
+  `'\n    "aps_preview_configs"'` 之前（即 capture 数组收尾处）。
+- `build_text()` 返回 `(payload, problems, notes)` 供闸门复用；`verify()` 断言
+  "模式列表 = 原 + `['retroCamera']`、原有条目逐项相等、顶层键不变"。
+- 用法：`python tools/build_x8u_algo_switch_config.py [--check]`。
+
+产物：**141,474 B / md5 `593dbc7913682da175663d708b005120`**。
+
+#### 4.12.4 绑定与发布闸门
+
+- `module/post-fs-data.sh`：把 `oplus_camera_algo_switch_config` 从 PMA110 专属的循环里**摘出来**，
+  改成对 PKJ110 **无条件** bind（`bind_file` 自带 umount-first）。PMA110 仍只 bind 另外三个
+  `oplus_*`。PKJ110 payload 目录因此从 2 个文件变成 3 个（`camera_unit_config`、
+  `camera_unit_feature_config.protobuf`、`oplus_camera_algo_switch_config`）。
+- `module/x8u-repair.sh`（设备侧"不重启也能修"的那个脚本）**同步**：D 段的重绑列表从
+  2 个文件加到 3 个，A 段的"期望值"也从过期的 29803/62004 B 改成闸门里那三个真值
+  （32454 / 62330 / 141474 B）。否则"用修复脚本代替重启"这条路会把 POP 修好的一半漏掉。
+  新大小/md5 同步进 `verify_port_artifacts.py` 的 `MODULE_SCRIPTS`。
+- `tools/verify_port_artifacts.py`：`PKJ110_PAYLOAD` 加第三项定值；`post-fs-data.sh` 大小/md5 定值
+  更新；`check_semantics()` 末尾新增 **`check_algo_config()`**（第 4b 组）：
+  动态 `importlib` 载入生成器 → 重建结果无 `problems` → `module/payload_pkj110/` 与
+  `port-x8u/payload/` **等值** → 产物与**原厂文本前缀逐字节一致**（到第一个追加点为止）→
+  尾部一致（`\n    ]\n}\n`）→ `"mode"` 出现次数**恰好多 2**。
+
+#### 4.12.5 实机验证（自有版本）
+
+- **手工 bind（首验）**：把自有 141,474 B 配置 bind 上去 → 重启相机 → `preview config is null`
+  **0 次** → POP 出片 `IMG20261014101708.jpg`（11,332,980 B）→ 照片 `IMG20261014101908.jpg` →
+  大师 `IMG20261014101930.jpg`（回归通过）。
+- **模块自身 bind（1.3.3 装机终验）**：装机后 `post-fs-data.sh` 在开机时自动完成三个 bind
+  （`/proc/self/mountinfo` 的源路径无 `//deleted`，三个 md5 与 payload 逐一相等）→
+  `am force-stop com.oplus.camera` 后重开 → 三模式出片：POP `IMG20261014110041.jpg`（13.1 MB）、
+  照片 `IMG20261014110153.jpg`、大师 `IMG20261014110222.jpg`，`preview config is null` **0 次**。
+  ⇒ **不依赖手工 mount，装包开机即生效。**
+
+⚠️ **本轮事故**：为验证 `post-fs-data.sh` 会自动 bind，执行了 `adb reboot`。**本机是临时 root**
+（`com.pkj110.rootapp` 用 CVE-64560 提权 + `insmod kernelsu.ko`，LKM 模式），**硬重启会掉 root**。
+详见 §4.12.6。
+
+#### 4.12.6 纪律：绝不能硬重启（2026-10-14 事故）
+
+> 用户原话：**「以后记住不能硬重启，硬重启又掉root了」**。
+
+- 硬重启（`adb reboot` / 断电重启）⇒ `/proc/uptime` 归零 ⇒ LKM 里的 KernelSU 没了 ⇒
+  `su` 立刻变成 `/system/bin/sh: su: inaccessible or not found`，`/data/adb` 不可读，**所有模块失效**。
+- **只能软重启**（重跑模块脚本而不重置内核），且**必须由用户本人操作**。
+- 需要"重启才生效"的步骤（典型：`post-fs-data.sh` 的 bind），优先改用**手工 `mount --bind`**，
+  或请用户软重启 —— **不要自己 reboot**。
+- 恢复临时 root 只能由用户重跑 `/data/local/tmp` 下的 root 工具（`com.pkj110.rootapp` /
+  `pkj110su --daemon` / `rootinit.sh`）。恢复后模块脚本**不会自动重跑**：软重启，或手工补 mount
+  （模块内那份 `x8u-repair.sh` 已同步为 3 个配置，可直接当手工修复用）。
+
+---
+
 ## 5. 符号层（Java / LSPosed）：209/210 原样可用（**前提是被测 APK 为 7.006.94**）
 
 > **版本前提（务必先看）**：本节数字来自 `G:/ColorOS17/x8u_extract/OplusCamera.apk`，
@@ -1868,8 +2087,21 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 ## 7. 仍未解决 / 需要人工决定的事项
 
 - [ ] ISP GR 调谐（`com.qti.tuned.zf*.bin`）与 gamma 表的 X8U 版本 —— 需要厂商调优工具，本工程无法生成。
-- [ ] `oplus_camera_config` / `algo_switch_config` / `aps_config` / 两个 `*_decision*.json` 的
-      解密与 GR 化（X8U 盘上为加密二进制）。
+- [ ] `oplus_camera_config` / `aps_config` / 两个 `*_decision*.json` 的解密与 GR 化
+      （X8U 盘上为加密二进制）。`oplus_camera_algo_switch_config` **已解决**（§4.12）。
+      > **2026-10-14 更正**：**解密不是必须的**。SDK 的 `UpdateHelper.getConfigString()`
+      > 在 `OplusStringJNI.needGetString()` 返回假时**直接把字节按 UTF-8 当 JSON 解析**，
+      > 所以**明文 JSON 会被接受**（X9U payload 里那几份就是明文）。
+      > 真正的取舍变成"要不要用 X9U 的全模式表覆盖 X8U 的行为"，见 §4.11.4 路线 B ——
+      > 最终**没有**用 X9U 的表，而是从设备原厂明文重建，见 §4.12。
+- [x] **POP 点快门不出片**（§4.11）—— **已修复（1.3.3，§4.12）**。根因：PKJ110 的
+      `oplus_camera_algo_switch_config` 里没有 `retroCamera`，
+      `AlgoSwitchConfig.getPreviewConfig("retroCamera",0,…)` 返回 null，APS 不给预览结果，
+      `bb.g.b=-1` ⇒ `BaseMode.m8` 尾句 `return gVar.b == getCameraId()` 必为 false。
+      修法采用**路线 B**：从设备原厂明文重建该配置并**纯追加** `retroCamera` 块
+      （`tools/build_x8u_algo_switch_config.py`，产物 141,474 B /
+      `593dbc7913682da175663d708b005120`），`post-fs-data.sh` 对 PKJ110 无条件 bind。
+      实机 POP / 照片 / 大师三模式回归通过，`preview config is null` 33 → 0。
 - [ ] **X10 调色盘：Java 层开不了，卡在 X8U 自己的原生 LUT 合成器**（§4.10）。
       1.3.0 的容器方案会把相机锁死（主线程 `ConditionVariable.block()`，§4.10.5）；
       1.3.1 改用 Java 侧回答 `com.oplus.feature.color.palette.support`（落点是 `CameraConfig.d`，
@@ -1884,7 +2116,8 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
 - [ ] 实机验证 `frame+0x18` / `object+0x008` 两处写操作（静态一致，但仍属高风险写）。
 - [ ] `Zoom.labelBitmaps` 用的是类型级多命中，若后续机型把非缓存 Bitmap 也放进 `ZoomSeekBar`，
       需要收紧（可加 `readBy` 限定到 `@Zoom.drawText`/`@Zoom.drawIcon`）。
-- [ ] PKJ110 的 `payload_pkj110/` 是否要补齐 `oplus_*`：需要先解决解密。
+- [ ] PKJ110 的 `payload_pkj110/` 是否要补齐 `oplus_*`：~~需要先解决解密~~
+      → **2026-10-14 更正：解密不是前置条件**（SDK 接受明文 JSON，见 §4.11.4）。
 - [x] ~~设备实际相机版本是 7.006.123，不是移植物依据的 7.006.94~~ —— **已完成**。
       设备 APK 已拉到 `x8u_extract/OplusCamera-7.006.123.apk`（176,189,839 B），解出 33 个 dex 到
       `_meta/dex_cam_7123/`，`replay.py camera dex_cam_7123 replay_camera_7123.json` 结果

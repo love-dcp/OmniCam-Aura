@@ -5,7 +5,7 @@
 # reasoning). Both profiles are marked [PMA110] / [PKJ110] below.
 #
 #   PMA110 (Find X9 Ultra) - payload/          , the full OmniCam config set, ISP + gamma bound.
-#   PKJ110 (Find X8 Ultra) - payload_pkj110/   , only the two regenerated config files; the
+#   PKJ110 (Find X8 Ultra) - payload_pkj110/   , the three regenerated config files; the other
 #                           encrypted oplus_* configs and the per-sensor ISP/gamma files are
 #                           deliberately left alone.
 MODDIR=${0%/*}
@@ -139,9 +139,10 @@ log "begin profile=$PROFILE config=$CONFIG_SRC"
 
 # [PMA110] payload/ carries the full set.
 #
-# [PKJ110] payload_pkj110/ carries ONLY the two regenerated files
-#   (camera_unit_config, camera_unit_feature_config.protobuf). The four encrypted
-#   oplus_* configs stay stock on purpose: on X8U they are encrypted binaries and
+# [PKJ110] payload_pkj110/ carries ONLY the three regenerated files
+#   (camera_unit_config, camera_unit_feature_config.protobuf, oplus_camera_algo_switch_config).
+#   Of the other three encrypted oplus_* configs, X8U's stock copies stay in place: they are
+#   opaque containers (header 01 01, decoded only by the native libOplusStringJNI.so) and
 #   PMA110's plaintext copies are not interchangeable.
 #
 #   History (2026-10-13). Injection was briefly DISABLED on the theory that the port
@@ -161,10 +162,21 @@ log "begin profile=$PROFILE config=$CONFIG_SRC"
 #   Verified on the produced file: 16380 pool references, max index 306 < pool length
 #   307, zero out of bounds; the three ported entries decode to exactly the same token
 #   multiset as X9U, and all 20 original entries are byte-identical.
-for NAME in oplus_camera_config oplus_camera_algo_switch_config oplus_camera_aps_config oplus_camera_preview_decision_config.json; do
+for NAME in oplus_camera_config oplus_camera_aps_config oplus_camera_preview_decision_config.json; do
     [ "$PROFILE" = PMA110 ] || continue
     bind_file "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"
 done
+# oplus_camera_algo_switch_config is the exception, and the reason this profile injects one more
+# file than it used to. It is the only place APS records which modes exist: the camera looks
+# "<mode>@<cameraId>" up in AlgoSwitchConfig.sPreviewConfigMap and, with no entry, gets null, so
+# APS produces no preview result for that mode at all. POP is the one mode X8U's own copy does not
+# list, and BaseMode.m8() then refuses every shutter press with bb.g.b still at its -1 default.
+# X9U's copy does list it, but it is not a drop-in base (different mode set, different per-mode
+# algorithm switches), so the PKJ110 payload is rebuilt from the device's own decoded text with
+# the retroCamera block appended:
+#   tools/build_x8u_algo_switch_config.py    port-x8u/README.md section 4.12
+bind_file "$CONFIG_SRC/oplus_camera_algo_switch_config" \
+    "/odm/etc/camera/config/oplus_camera_algo_switch_config"
 # Both profiles bind the same two files. The config directory is deliberately NOT merged: 1.3.0
 # merged it to carry a synthesised OCS "config parse version 2" container
 # (oplus_camera_feature_config), which turned out to deadlock the camera on the first feature

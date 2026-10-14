@@ -73,5 +73,9 @@ python tools/verify_port_artifacts.py   # PKJ110 载荷定值、语义 diff、�
 
 ## 来源与许可
 
+OmniCam Aura 由 **苯宝宝是个醚**（GitHub: [benbaobaoshigemi](https://github.com/benbaobaoshigemi)，上游
+仓库 [benbaobaoshigemi/OmniCam-Aura](https://github.com/benbaobaoshigemi/OmniCam-Aura)）原创并开源；
+本仓库在其基础上做 OPPO Find X8 Ultra（PKJ110）的移植与维护。
+
 本仓库的原创源码和脚本按 [MIT 许可证](LICENSE) 开放。相机厂商的库、固件配置及媒体资源保留原
 权利人的权利；MIT 许可证不授予这些文件的再许可。项目与相机厂商无隶属关系。
