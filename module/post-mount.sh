@@ -16,14 +16,18 @@
 #       Installs OmniCam's own backends over /odm/lib64, as before.
 #
 #   PKJ110 (Find X8 Ultra) - ISP tuning is com.qti.tuned.zf*.bin.
-#       Replaces NOTHING. X8U's own libAlgoInterface.so (60 MB) and libBasicTonePhoto.so
-#       (538 KB) are the real backend, and libAlgoInterface loads libBasicTonePhoto.so by name.
-#       Overlaying the X9U pair put OmniCam's 8 KB router stub in that slot, so the stub
-#       dlopen'd X10 - an X9U backend, created by the very same overlay - for X8U hardware.
-#       The preview pipeline stalled there and the camera came up on a black frame with a
-#       frozen UI. The X8U libraries have to stay untouched.
-#       The two X9/X10 files still arrive through the overlay and are inert: X8U's libraries
-#       reference neither name (0 occurrences in libBasicTonePhoto.so and libAlgoInterface.so).
+#       Replaces exactly ONE library: libBasicTonePhoto.so, bound from the X9U backend
+#       (system/odm/lib64/libBasicTonePhotoX10.so) under its stock name. X8U's build of that file
+#       carries no palette code at all -- 0 occurrences of "Palette" against the X9U backend's
+#       PaletteSCLutMalloc / PaletteSCLutFrameMalloc / m_iPaletteFlag -- so the palette looked
+#       right in preview (which uses libCombineLut.so, shipped inside the camera APK) and never
+#       reached the shot. Full reasoning, and why the X9U backend is safe here while the X9U
+#       *pair* was not, is in README 4.14 and in the block at the end of this branch.
+#       X8U's own libAlgoInterface.so (60 MB) and libmsnativefilter.so stay untouched: the
+#       black-frame incident was the X9U pair -- AlgoInterface included -- landing under the 8 KB
+#       router stub that payload/lib64 puts in that slot, so the stub dlopen'd X10 for X8U
+#       hardware and the preview pipeline stalled. Neither the stub nor the X9U AlgoInterface is
+#       involved in what happens below.
 #
 # Do NOT detect with `[ -f /odm/lib64/libBasicTonePhotoX9.so ]`: the module itself ships that file
 # and metamount.sh has already overlaid it by the time this phase runs, so it exists on both
@@ -101,7 +105,7 @@ if [ "$PROFILE" = PMA110 ]; then
     bind_library "$MODDIR/payload/lib64/libAlgoInterface.so"  libAlgoInterface.so
     bind_library "$MODDIR/payload/lib64/libmsnativefilter.so" libmsnativefilter.so
 else
-    log "PKJ110: no library replacement (X8U keeps its own backend)"
+    log "PKJ110: X8U keeps AlgoInterface + msnativefilter; basic-tone comes from the X10 backend"
     # metamount.sh has ALREADY overlaid /odm/lib64 from /mnt/vendor/mountify/odm/lib64, and that
     # workspace copy is where the X9U backends come from. No module script can stop the overlay
     # from being created -- but this phase runs immediately afterwards as root, so it can be
@@ -128,6 +132,41 @@ else
     for L in libBasicTonePhoto.so libAlgoInterface.so libmsnativefilter.so; do
         log "  $L = $(stat -c %s "/odm/lib64/$L" 2>/dev/null) B  (X8U stock 538400 / 60867488 / 7992584)"
     done
+
+    # The single backend PKJ110 does take -- and ONLY this one (README 4.14).
+    #
+    # libBasicTonePhoto.so is where a capture's colour cards are actually applied. X8U's build has
+    # no palette code in it: grep for "Palette" finds nothing, while the X9U backend (the X10 file
+    # staged by the overlay) exports BasicTone::PaletteSCLutMalloc / PaletteSCLutFrameMalloc and
+    # reads the same SimTool_Photo_*.ini files X8U already has. That asymmetry is the whole reason
+    # the palette was colour-accurate in preview and came back uncoloured in the shot.
+    #
+    # The X9U backend is a drop-in here, unlike the other two, and that was measured, not assumed:
+    #   * identical DT_NEEDED lists (libsharebuffer/liblog/libGLESv3/libEGL/libdl/libc/libm) --
+    #     no X9U-only dependency to satisfy;
+    #   * identical entry points: both libraries export the same 39 unmangled symbols, led by
+    #     getAlgoAPI and OGLBasicToneProcess, which is how libAlgoInterface.so reaches this file
+    #     (it dlopen()s the name and names no BasicTone C++ symbol at all);
+    #   * the internal C++ signatures that did change (BasicToneRender::init gained a bool,
+    #     BasicTone_OGL::loadLut gained the profile path) are module-private and never called from
+    #     outside, so they cannot break the caller.
+    # Observed on device 2026-10-14: preview unaffected, capture gains the palette, and the log
+    # shows the expected chain --
+    #   iPaletteFlag = 1 -> BasicTonePaletteProcessNext -> SCLutMallocPalette
+    #   reading palette lut .../palette/HDR/SC16Lut4 -> SCLutFrameMallocPalette SC16Lut0..8
+    #   -> Palette process success!
+    #
+    # Prerequisite, already fixed in this release: the GR hook in libaura_native.so used to hook
+    # the classic loadLut(CamMode), which this backend renamed, so its one-shot guard never latched
+    # and a second dlopen re-hooked processCore until LSPosed dropped the trampoline -- SEGV at
+    # pc=0 in OGLBasicToneProcess, thread RefFrameProc (2026-10-14 19:22:45). See
+    # app/src/main/cpp/gr_basictone.cpp.
+    if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then
+        umount /odm/lib64/libBasicTonePhoto.so 2>>"$LOG" \
+            && log "PKJ110: detached stale libBasicTonePhoto.so bind"
+    fi
+    bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhoto.so
+    log "PKJ110: basic-tone now $(md5sum /odm/lib64/libBasicTonePhoto.so 2>/dev/null | cut -d' ' -f1)"
 fi
 
 log "end profile=$PROFILE"

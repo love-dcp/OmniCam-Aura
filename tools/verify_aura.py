@@ -81,15 +81,19 @@ with ZipFile(ARCHIVE) as bundle, ZipFile(APK) as apk:
     # ConcurrentHashMap and returns from there on every later call.
     #
     # Answering the key in Java (hooking CameraConfig.d) does make Lut3dDataManager.paletteMode()
-    # true -- measured on device -- but it then hard-crashes the camera: Lut3dDataManager.e takes
-    # its palette branch (+0x15c) and the X8U native combiner (libCombineLutJni.processV3) dies on
-    # a bad pointer. So the switch is NOT shipped; only the colour cards are. See README 4.10.10.
+    # true. 1.3.2 withdrew exactly that hook because the camera then died in
+    # libCombineLutJni.processV3 -- but the cause was the missing [PaletteSCLut] ini, not the
+    # switch (README 4.13). 1.3.4 merged that ini and 1.3.5 ships the switch for real, alongside
+    # the capture-side backend it needs (README 4.14). The probe still matters: a device that
+    # ships the parse-version-2 container is left alone, see PaletteFeatureSwitch.hasOwnContainer.
     require('payload_pkj110/camera_unit_feature_config.protobuf' in names,
             'PKJ110 source FeatureTable missing')
     require('payload_pkj110/oplus_camera_feature_config' not in names,
             'PKJ110 ships the config parse version 2 container again: it deadlocks the camera')
-    require('PaletteFeatureSwitch' not in (PROJECT / 'app/src/main/java/local/omnicam/aura/ModuleEntry.java').read_text(encoding='utf-8'),
-            'the palette switch is installed again: it crashes the X8U camera on basic-tone init')
+    require('PaletteFeatureSwitch.installCamera' in
+            (PROJECT / 'app/src/main/java/local/omnicam/aura/ModuleEntry.java').read_text(encoding='utf-8'),
+            'the palette switch is no longer installed: on PKJ110 nothing else answers '
+            'com.oplus.feature.color.palette.support, so preview and capture both lose the palette')
     for prefix in ('payload/x10_basictone/palette/HDR/SC16Lut', 'payload/x10_basictone/palette/SDR/SC16Lut'):
         for index in range(9):
             require(f'{prefix}{index}' in names, f'Palette colour card missing: {prefix}{index}')
@@ -133,15 +137,24 @@ require('elif [ "$PROFILE" != PMA110 ]; then' in hwcfg,
         'Pro video ISZ is no longer gated away from the PKJ110 profile')
 for name in ('PROFILE=$(detect_profile)', 'CONFIG_SRC=$MODDIR/payload_pkj110'):
     require(name in hwcfg, f'PKJ110 profile selection missing from post-fs-data.sh: {name}')
-# The palette switch is deliberately NOT shipped: answering it in Java makes paletteMode() true but
-# then hard-crashes the camera on basic-tone init (README 4.10.10). So the config directory must NOT
-# be merged either -- merging it was how the synthesised version-2 container got in, which deadlocks
-# the camera. The colour cards are still merged into basictone -- assert both halves so a regression
-# cannot silently bring the container back or drop the cards.
+# The palette switch IS shipped now (2026-10-14, README 4.13/4.14); what must stay out is the config
+# directory merge. Merging it was how the synthesised version-2 container got in, and that container
+# deadlocks the camera -- CameraConfigure.getProjectSupportFeatureValue() blocks on a
+# ConditionVariable that only a later initialize() opens (README 4.10.7). The colour cards are
+# merged into basictone instead -- assert both halves so a regression cannot quietly bring the
+# container back or drop the cards.
 require('bind_merged_dir /odm/etc/camera/config "$CONFIG_EXTRA"' not in hwcfg,
         'PKJ110 config directory is merged again: the version-2 container deadlocks the camera')
 require('x10_basictone/palette' in hwcfg and 'SimTool_Palette_' in hwcfg,
         'PKJ110 palette colour cards are no longer merged into basictone')
+# ...and the [PaletteSCLut] carrier must be merged BY NAME, not by glob. It is the one payload ini
+# that SimTool_Palette_*.ini does not match, yet it is the exact file libCombineLut.so's
+# BasicTonePaletteMalloc() -> read3DlutSet() opens. Leaving it out makes PaletteSCSize/SCLutNum
+# read back 0, SCLutMallocPalette() fail, and BasicTonePaletteProcessNext() return without writing
+# OutParam -- which the JNI then uses uninitialised to size its output float[] (README 4.13).
+require('"$MODDIR/payload/x10_basictone/setting"/SimTool_Preview_Palette_Normal.ini' in hwcfg,
+        'post-fs-data.sh no longer merges SimTool_Preview_Palette_Normal.ini: its [PaletteSCLut] '
+        'lut_size/SCLutNum are what keep the palette branch from failing into a bad_alloc')
 mount = (MODULE / 'post-mount.sh').read_text(encoding='utf-8')
 require('PROFILE=$(detect_profile)' in mount, 'PKJ110 profile selection missing from post-mount.sh')
 require('bind_library "$MODDIR/payload/lib64/' in mount,
@@ -149,5 +162,13 @@ require('bind_library "$MODDIR/payload/lib64/' in mount,
 for lib in ('libAlgoInterface.so', 'libBasicTonePhoto.so', 'libmsnativefilter.so'):
     require(f'"$MODDIR/payload/lib64/{lib}"' in mount,
             f'PMA110 backend bind lost: {lib}')
+# The PKJ110 capture-side half (README 4.14). Without this bind the palette is answered in Java
+# and the request does carry the algorithm, but nothing applies the colour cards: X8U's stock
+# libBasicTonePhoto.so has no palette code in it at all, so the preview looks right and the shot
+# comes back uncoloured. It is bound from the X9U backend under the stock name, and it is the ONLY
+# X8U file replaced -- AlgoInterface and msnativefilter stay stock, and the 8 KB router stub in
+# payload/lib64 is not involved (that combination is what produced the old black frame).
+require('bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhoto.so' in mount,
+        'PKJ110 lost its libBasicTonePhoto.so bind: captures silently lose the palette again')
 subprocess.run(['cmd', '/c', str(BUILD_TOOLS / 'apksigner.bat'), 'verify', str(APK)], check=True)
-print('PASS: signed headless Aura APK; camera/gallery scope; GR/POP backends and all six palette capture nodes present; two device profiles wired; pro video ISZ present and PMA110-gated; PKJ110 palette colour cards packaged, palette switch left off (it crashes the camera)')
+print('PASS: signed headless Aura APK; camera/gallery scope; GR/POP backends and all six palette capture nodes present; two device profiles wired; pro video ISZ present and PMA110-gated; PKJ110 palette complete -- colour cards, [PaletteSCLut] ini, Java feature switch, and the X10 basic-tone backend bound over stock')

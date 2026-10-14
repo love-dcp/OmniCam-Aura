@@ -59,9 +59,23 @@ SECTIONS = ("aps_capture_configs", "aps_preview_configs")
 # The two sections use different colon spacing in the stock file; follow each one so the appended
 # block cannot be spotted from the surrounding text.
 SEPARATORS = {"aps_capture_configs": " : ", "aps_preview_configs": ": "}
+CAPTURE_ANCHOR = '"aps_capture_configs"'
 PREVIEW_ANCHOR = '\n    "aps_preview_configs"'
 ADDED_MODE = "retroCamera"
 INDENT = 4
+
+# The palette capture node (2026-10-14, README 4.14).
+#
+# `AlgoSwitchConfig.getSupportCaptureAlgo(mode, cameraId, "aps_algo_color_palette")` is answered
+# purely out of this file -- CONFIG_CONDITION.block(); sCaptureConfigMap.get(mode + "@" + cameraId);
+# found && sCaptureConfigMap.<flag> && <Set>.contains(algo) -- and it gates whether a capture
+# request carries the palette algorithm at all, because X10FilterPort.hookPaletteCapture silently
+# returns when it is false. X8U's stock table declares the key nowhere, which is exactly why the
+# palette was colour-accurate in preview and uncoloured in the shot. PMA110's copy declares it for
+# common / portrait / aiHighPixel; X8U's stock file has those same three modes, so the same three
+# are extended here. Five insertions in total -- aiHighPixel carries a single camera entity.
+PALETTE_KEY = "aps_algo_color_palette"
+PALETTE_MODES = ("common", "portrait", "aiHighPixel")
 # The array close of each section, exactly as it appears in the stock text.
 CLOSE = "\n    ]"
 
@@ -228,18 +242,63 @@ def splice(text, section_name, entry):
     return text[:position] + ",\n" + block + text[position:]
 
 
+def splice_palette(text):
+    """Add PALETTE_KEY to every capture entity of PALETTE_MODES. Returns (text, inserted count).
+
+    Text level, like everything else in this tool. The new line is placed immediately after each
+    entity's own `"enable"` line, which keeps the object's key order plausible and leaves every
+    existing value and type byte-identical -- additions are allowed by the config rules, edits are
+    not (README 4.1). Only the `aps_capture_configs` half is touched: a palette node has no
+    meaning in a preview config, and PALETTE_MODES is intersected with what the stock file has.
+    """
+    begin = text.index(CAPTURE_ANCHOR)
+    end = text.index(PREVIEW_ANCHOR)
+    section = text[begin:end]
+    starts = [match.start() for match in re.finditer(r'"mode"\s*:\s*"', section)] + [len(section)]
+    inserted = [0]
+
+    def add(match):
+        inserted[0] += 1
+        return match.group(0) + "\n" + match.group(1) + '"%s" : 1,' % PALETTE_KEY
+
+    chunks = []
+    for index in range(len(starts) - 1):
+        head = section[starts[index]:starts[index + 1]]
+        name = re.match(r'"mode"\s*:\s*"([^"]+)"', head).group(1)
+        if name in PALETTE_MODES:
+            head = re.sub(r'(\n[ \t]*)"enable"\s*:\s*\d+,', add, head)
+        chunks.append(head)
+    rebuilt = text[:begin] + section[: starts[0]] + "".join(chunks) + text[end:]
+    return rebuilt, inserted[0]
+
+
 # ---------------------------------------------------------------------------
 # verification
 # ---------------------------------------------------------------------------
-def verify(stock, rebuilt):
+def verify(stock, rebuilt, palette_added=0):
     problems = []
+    expected_palette = sum(
+        len(entry.get("entity", []))
+        for entry in stock.get("aps_capture_configs", [])
+        if entry.get("mode") in PALETTE_MODES
+    )
+    if palette_added != expected_palette:
+        problems.append("inserted %d palette nodes, expected %d" % (palette_added, expected_palette))
     for section in SECTIONS:
         before = [entry.get("mode") for entry in stock[section]]
         after = [entry.get("mode") for entry in rebuilt[section]]
         if after != before + [ADDED_MODE]:
             problems.append("%s mode list is %s" % (section, after))
         for index, entry in enumerate(stock[section]):
-            if entry != rebuilt[section][index]:
+            # The palette node is the one delta permitted against a stock entry. Comparing plain
+            # dicts, so key order inside the object is irrelevant; only presence and value count.
+            expected = entry
+            if section == "aps_capture_configs" and entry.get("mode") in PALETTE_MODES:
+                expected = dict(entry)
+                expected["entity"] = [
+                    dict(entity, **{PALETTE_KEY: 1}) for entity in entry.get("entity", [])
+                ]
+            if expected != rebuilt[section][index]:
                 problems.append("%s[%d] %s changed" % (section, index, entry.get("mode")))
     for key, value in stock.items():
         if key in SECTIONS:
@@ -250,7 +309,7 @@ def verify(stock, rebuilt):
 
 
 def build_text():
-    """Return (payload text, verification problems, per-section notes). Never writes."""
+    """Return (text, problems, section notes, palette insertions). Never writes."""
     stock_text, stock = load_stock()
     template = load_template()
     text = stock_text
@@ -262,13 +321,16 @@ def build_text():
             (section, len(entry.get("entity", [{}])[0]), sorted(set(removed)))
         )
         text = splice(text, section, entry)
-    return text, verify(stock, loads(strip_jsonc(text))), notes
+    text, palette_added = splice_palette(text)
+    return text, verify(stock, loads(strip_jsonc(text)), palette_added), notes, palette_added
 
 
 def main(argv):
-    text, problems, notes = build_text()
+    text, problems, notes, palette_added = build_text()
     for section, kept, removed in notes:
         print("  note  %s: %d keys kept, pruned %s" % (section, kept, removed or "nothing"))
+    print("  note  palette: %d `%s` nodes inserted into %s"
+          % (palette_added, PALETTE_KEY, "/".join(PALETTE_MODES)))
     if problems:
         for problem in problems:
             print("  FAIL  %s" % problem)
@@ -276,7 +338,8 @@ def main(argv):
 
     payload = text.encode("utf-8")
     print("  ok    stock text is spliced, never re-serialised")
-    print("  ok    only the two %s appends differ from the stock config" % ADDED_MODE)
+    print("  ok    only the two %s appends and the palette nodes differ from the stock config"
+          % ADDED_MODE)
     print("  ok    %d bytes, md5 %s" % (len(payload), hashlib.md5(payload).hexdigest()))
 
     if "--check" in argv:

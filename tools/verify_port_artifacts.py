@@ -50,11 +50,12 @@ PKJ110_PAYLOAD = {
         "b0ee50c1a3bbc9e1dcc20f2391a490c2",
     ),
     # Not a copy of PMA110's file: the device's own decoded stock text with the retroCamera block
-    # appended, so the payload stays "stock plus pure appends" like every other ported config.
-    # Rebuilt by tools/build_x8u_algo_switch_config.py; see README section 4.12.
+    # appended and the palette capture node added to common/portrait/aiHighPixel, so the payload
+    # stays "stock plus additions" like every other ported config.
+    # Rebuilt by tools/build_x8u_algo_switch_config.py; see README sections 4.12 and 4.14.
     "oplus_camera_algo_switch_config": (
-        141474,
-        "593dbc7913682da175663d708b005120",
+        141729,
+        "10a2532d483d3c3357eb266f35b3142e",
     ),
 }
 # X9U payload must stay untouched by PKJ110 work.
@@ -69,9 +70,9 @@ PMA110_PAYLOAD = {
     ),
 }
 MODULE_SCRIPTS = {
-    "post-fs-data.sh": (15176, "95706093c62104f0e7e1d736e5f7ab3f"),
+    "post-fs-data.sh": (16430, "42e919f6c420d000d4b6099066e8755d"),
     "service.sh": (6798, "4a71d4eead6cefba07c3d3f09e1ed74d"),
-    "post-mount.sh": (6620, "6d2dbca7d873093e2cd83f832da0bc3d"),
+    "post-mount.sh": (9505, "2512f1bb1acd1fcb8f4c798c932a0e89"),
     # Device-side repair/diagnostics for the POP regression; shipped so the fix can also be
     # applied from the phone alone (module/x8u-fix-pop.sh falls back to its own payload).
     "x8u-fix-pop.sh": (9179, "a2509565a57e17b7816a1783caee5986"),
@@ -342,11 +343,12 @@ def load_builder():
 
 
 def check_algo_config():
-    print("      (oplus_camera_algo_switch_config: stock text + two retroCamera appends)")
+    print("      (oplus_camera_algo_switch_config: stock text + two retroCamera appends "
+          "+ the palette capture nodes)")
     builder = load_builder()
 
-    text, problems, notes = builder.build_text()
-    check("rebuild deviates from the stock base in nothing but the appends",
+    text, problems, notes, palette_added = builder.build_text()
+    check("rebuild deviates from the stock base in nothing but the appends and palette nodes",
           not problems, str(problems[:4]))
     for section, kept, pruned in notes:
         if pruned:
@@ -366,12 +368,18 @@ def check_algo_config():
     with open(os.path.join(REPO, "module", "payload_pkj110",
                            "oplus_camera_algo_switch_config"), "rb") as handle:
         payload = handle.read()
-    # The appends sit inside the file, one per section, so only the prefix ahead of the first one
-    # and the tail of the file can be asserted byte for byte. The rebuild comparison above is the
-    # strong check; these two say the stock bytes around the appends were not rewritten.
-    anchor = stock_text.index(b'\n    ],\n    "aps_preview_configs"')
-    check("stock text ahead of the first append is byte-identical",
-          payload.startswith(stock_text[:anchor]))
+    # The insertions sit inside mode blocks -- the retroCamera appends at the end of each section
+    # and the palette nodes inside the capture entities -- so the file can no longer be split at a
+    # single anchor. The whole-file equality above is the strong check; these pin down the byte
+    # level properties a re-serialisation would have destroyed.
+    palette_line = b'\n\n                    "aps_algo_color_palette" : 1,'
+    preview_at = payload.index(b'"aps_preview_configs"')
+    check("palette node in every capture entity (%d), none in preview" % palette_added,
+          payload.count(palette_line) == palette_added
+          and payload.rindex(palette_line) < preview_at,
+          "%d occurrences" % payload.count(palette_line))
+    check("stock head survives verbatim",
+          payload.startswith(stock_text[: stock_text.index(b'"enable"')]))
     check("stock tail is byte-identical", payload.endswith(b"\n    ]\n}\n"))
     check("exactly two mode blocks were appended",
           payload.count(b'"mode"') == stock_text.count(b'"mode"') + 2,

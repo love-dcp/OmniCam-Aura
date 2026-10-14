@@ -199,9 +199,21 @@ if [ "$PROFILE" = PMA110 ]; then
 else
     # [PKJ110] Only the palette half of x10_basictone/ is merged. palette/{HDR,SDR}/SC16Lut0..8
     # are the colour cards CombineLutHelper reads from /odm/etc/camera/basictone/palette once
-    # Lut3dDataManager.paletteMode() says yes (see the config comment above), and the four
-    # SimTool_Palette_*.ini describe them; none of those names exist in X8U's stock tone
-    # directory, so this is a pure addition and reverts by simply dropping the bind.
+    # Lut3dDataManager.paletteMode() says yes (see the config comment above), and the palette
+    # settings describe them; none of those names exist in X8U's stock tone directory, so this is
+    # a pure addition and reverts by simply dropping the bind.
+    #
+    # ALL FOUR of the payload's setting/*.ini must land, and SimTool_Preview_Palette_Normal.ini is
+    # the one that does NOT match the SimTool_Palette_*.ini glob -- do not go back to the glob.
+    # It is the only file carrying the [PaletteSCLut] lut_size/SCLutNum pair, and it is the exact
+    # filename Param_BasicTone_CPU::BasicTonePaletteMalloc() -> read3DlutSet() opens (the string is
+    # baked into libCombineLut.so). Missing it, read3DlutSet() reports PaletteSCSize: 0 /
+    # PaletteSCLutNum: 0, SCLutMallocPalette() then hunts for palette/HDR/SC0Lut4, fails, and
+    # BasicTonePaletteMalloc() returns failure -- whereupon BasicTonePaletteProcessNext() returns
+    # WITHOUT filling OutParam. libCombineLutJni's processV3 never checks that return value: it
+    # sizes its float[] as 3*OutParam[0]^3 off uninitialised stack, the overflow guard turns that
+    # into operator new[](SIZE_MAX) (or a huge mmap that then faults), and the camera dies in
+    # bad_alloc/the copy right after -- the SIGBUS+SIGSEGV pair in README 4.13.1.
     #
     # lmt/{LMTPhotoLut*,SCLut*} is deliberately NOT merged: those are per-device tone tables read
     # straight by BasicTone/AlgoInterface, and X8U already has its own lmt/ (including SC16Lut0),
@@ -211,9 +223,12 @@ else
         mkdir -p "$BT_EXTRA/palette" "$BT_EXTRA/setting"
         cp -a "$MODDIR/payload/x10_basictone/palette"/. "$BT_EXTRA/palette"/ 2>>"$LOG" \
             || log "palette copy FAIL"
-        cp -a "$MODDIR/payload/x10_basictone/setting"/SimTool_Palette_*.ini "$BT_EXTRA/setting"/ 2>>"$LOG" \
-            || log "palette ini copy FAIL"
-        log "palette extra: $(find "$BT_EXTRA/palette" -type f | wc -l) cards"
+        for INI in "$MODDIR/payload/x10_basictone/setting"/SimTool_Palette_*.ini \
+                   "$MODDIR/payload/x10_basictone/setting"/SimTool_Preview_Palette_Normal.ini; do
+            [ -f "$INI" ] || continue
+            cp -a "$INI" "$BT_EXTRA/setting"/ 2>>"$LOG" || log "palette ini copy FAIL: $INI"
+        done
+        log "palette extra: $(find "$BT_EXTRA/palette" -type f | wc -l) cards, $(ls "$BT_EXTRA/setting" | wc -l) inis"
     else
         log "palette skip: no payload"
     fi

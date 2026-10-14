@@ -73,6 +73,20 @@ int (*filterRegisterV1)(void *, int);
 int (*filterUnregisterV1)(void *, int);
 uintptr_t (*originalProcessCore)(void *, void *, void *, void *, void *);
 uintptr_t (*originalLoadLut)(void *, int);
+// Guards hookBasicTone against being run twice on the same library.
+//
+// The old guard was `originalProcessCore && originalLoadLut`, which only latches when BOTH
+// symbols resolve. X8U's stock libBasicTonePhoto.so exports the classic loadLut(CamMode), but the
+// X9U backend (libBasicTonePhotoX10.so, staged as libBasicTonePhoto.so on PKJ110) renamed it to
+// loadLut(CamMode, const char*, bool). There originalLoadLut stays NULL forever, so every
+// dlopen("libBasicTonePhoto*.so") re-ran this function; the second inline hook on an already
+// patched processCore fails, and on failure LSPosed clears the backup it was handed -- leaving
+// originalProcessCore NULL while the first hook's branch is still in place. The next BasicTone
+// frame then called through that NULL trampoline:
+//   #00 pc 0  #01 libaura_native.so  #02 libBasicTonePhoto.so (OGLBasicToneProcess+36)
+//   #03 libBasicTonePhoto.so (basictoneOcce::ThreadWorker::run+240)
+// i.e. signal 11 at fault addr 0x0 in thread RefFrameProc (observed 2026-10-14 19:22:45).
+bool basicToneHooked = false;
 
 // getLmtParamsV1 runs per frame before BasicTone; remember which LUT tree belongs to each parameter
 // block so processCore/loadLut (which no longer see the frame) can pick it.
@@ -125,6 +139,8 @@ int filterProcessV2(void *frame, int stage) {
 }
 
 uintptr_t processCore(void *object, void *input, void *output, void *parameters, void *metadata) {
+    // Defence in depth: never call through a trampoline the hook framework refused to build.
+    if (!originalProcessCore) return 0;
     int previous = activeProfile;
     activeProfile = kUnknown;
     FrameProfile profile;
@@ -147,6 +163,7 @@ uintptr_t processCore(void *object, void *input, void *output, void *parameters,
 }
 
 uintptr_t loadLut(void *object, int mode) {
+    if (!originalLoadLut) return 0;
     // Intermediate ODT passes carry no profile; they keep the object's current LUTs.
     if (activeProfile != kUnknown) {
         char *lmtPath = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
@@ -204,16 +221,35 @@ void hookAlgoInterface(HookFunction hook, void *handle) {
 }
 
 void hookBasicTone(HookFunction hook, void *handle) {
-    if (originalProcessCore && originalLoadLut) return;
+    if (basicToneHooked) return;
     // The X10 router exports getAlgoAPI only; its X9/X10 backends keep these BasicTone_OGL entries.
-    // PKJ110 has no router: its libBasicTonePhoto.so *is* the backend, so the same two symbols are
+    // PKJ110 has no router: its libBasicTonePhoto.so *is* the backend, so the same symbol is
     // exported directly and this branch fires on the plain library name.
     const char *coreSymbol = "_ZN13BasicTone_OGL11processCoreEP5ImageS1_PvS2_";
     if (!dlsym(handle, coreSymbol)) return;
     hookExport(hook, handle, coreSymbol, reinterpret_cast<void *>(processCore),
                reinterpret_cast<void **>(&originalProcessCore), kTag);
-    hookExport(hook, handle, "_ZN13BasicTone_OGL7loadLutE7CamMode",
-               reinterpret_cast<void *>(loadLut), reinterpret_cast<void **>(&originalLoadLut), kTag);
+    if (!originalProcessCore) {
+        // Inline hook reported success but handed back no trampoline: the branch is live and the
+        // shim would jump to NULL. Latch anyway -- re-hooking an already patched address is what
+        // caused the crash this guard exists to prevent.
+        basicToneHooked = true;
+        __android_log_print(ANDROID_LOG_ERROR, kTag,
+                            "processCore hook unusable (no trampoline); BasicTone GR path disabled");
+        return;
+    }
+    // X9U's backend renamed this to loadLut(CamMode, const char*, bool) to carry the profile path.
+    // hookExport only ever calls dlsym() on the exact name, so asking for the classic form on a
+    // backend that lacks it would fail harmlessly -- but it must not be treated as a hook, and the
+    // GR LMT path swap does not apply there anyway.
+    if (dlsym(handle, "_ZN13BasicTone_OGL7loadLutE7CamMode")) {
+        hookExport(hook, handle, "_ZN13BasicTone_OGL7loadLutE7CamMode",
+                   reinterpret_cast<void *>(loadLut), reinterpret_cast<void **>(&originalLoadLut), kTag);
+    } else {
+        __android_log_print(ANDROID_LOG_INFO, kTag,
+                            "loadLut classic symbol absent (X10 backend); GR LMT path swap disabled");
+    }
+    basicToneHooked = true;
 }
 
 }  // namespace

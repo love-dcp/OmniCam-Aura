@@ -26,11 +26,11 @@ APK 没有 Activity、启动入口或设置界面，功能固定启用。
 
 | | PMA110（Find X9 Ultra） | PKJ110（Find X8 Ultra） |
 |---|---|---|
-| 配置来源 | `payload/`，完整配置集 | `payload_pkj110/`，两份按 X8U 原厂数据重新生成的配置；调色盘开关**不开**（Java 层能开但相机原生崩溃，见下） |
+| 配置来源 | `payload/`，完整配置集 | `payload_pkj110/`，两份按 X8U 原厂数据重新生成的配置；调色盘开关**不开**（原因见下「X10 调色盘调谐」行） |
 | 后端库 | 用模块自带的 X9U 后端覆盖 `/odm/lib64` | **完全不改**，X8U 自己的库即真实后端 |
 | ISP 调谐 | 挂载 `com.qti.tuned.lighthouse*.bin` | 不下发（X8U 用逐传感器的 `com.qti.tuned.zf*.bin`） |
 | gamma 表 | 挂载 | 不下发（逐传感器曲线不同） |
-| X10 调色盘调谐 | merge | 只 merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_Palette_*.ini`；`lmt/` 保持原厂。**开关不开**：1.3.1 试过在 Java 层回答 `com.oplus.feature.color.palette.support`，开关确实生效，但 `Lut3dDataManager.e` 随即走调色盘分支、在 X8U 自己的 `libCombineLutJni.processV3` 里原生崩溃，故 1.3.2 撤回 |
+| X10 调色盘调谐 | merge | 只 merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_*Palette*.ini`；`lmt/` 保持原厂。**开关仍不开**：1.3.1 试过在 Java 层回答 `com.oplus.feature.color.palette.support`，开关确实生效，但随即在 X8U 自己的 `libCombineLutJni.processV3` 里原生崩溃。**1.3.4 查出了真因**：不是「X8U 缺能处理调色盘的原生件」（五个后端件与 X9U **逐字节相同**），而是模块原先用 `SimTool_Palette_*.ini` 做 glob，漏合并了原生写死要打开的那一个 `SimTool_Preview_Palette_Normal.ini`；已补上具名合并，**开关未下发故行为零变化**。详见 [`port-x8u/README.md`](port-x8u/README.md) §4.13 |
 | Pro video ISZ | 启用 | 跳过（未在 X8U 上验证过） |
 
 **一条硬规则：凡是设备相关的后端库都不能放进模块的 `system/` 目录。** KernelSU 的
@@ -42,8 +42,9 @@ APK 没有 Activity、启动入口或设置界面，功能固定启用。
 做 bind 目标，而 X8U 的库不引用这两个名字）。
 
 PKJ110 的完整移植过程、两条 POP 故障的根因分析（配置层 `usecase_info` 畸形、native 层
-`dlopen(NULL)` 空指针）与 POP「浓郁」滤镜缺失色卡的处置，见
-[`port-x8u/README.md`](port-x8u/README.md)。
+`dlopen(NULL)` 空指针）、POP「浓郁」滤镜缺失色卡的处置，以及 **X8U 调色盘崩机的真正根因**
+（模块漏合并了一个被原生代码写死文件名的 ini，而不是缺原生件）见
+[`port-x8u/README.md`](port-x8u/README.md)，后者详见 §4.13。
 
 ## 安装
 

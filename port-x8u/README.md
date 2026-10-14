@@ -1439,6 +1439,12 @@ X8U 的 ODM 里有一个语义等价、**确实存在**的正片色卡：
 所以 **1.3.2 不装这个钩子**：开关是原厂值 false，面板不出现，相机稳定（§4.10.12）。
 要真正做成，缺的是 X9U 那份能处理调色盘组合的 `/product/lib64/libCombineLut*.so`，见 §4.10.11。
 
+> **本节第 4 行「缺 X9U 原生件」以及 §4.10.11 的整条结论已被 §4.13 推翻**（2026-10-14）：
+> X8U 与 X9U 的五个后端件**逐字节相同**，X8U 跑的就是同一个 `libCombineLut.so`；
+> 真正的缺口是模块**从来没把 `SimTool_Preview_Palette_Normal.ini` 合并进去**（glob 漏配），
+> 于是 `PaletteSCSize/SCLutNum` 读回 0、palette 初始化失败，而 JNI 不检查返回值、
+> 拿未初始化的 `OutParam[0]` 去算 `new float[3n³]` —— 崩的是这一行，不是原生件不会做调色盘。
+
 #### 4.10.1 症状与第一层判据
 
 大师 / 哈苏滤镜下本该弹出**调色盘面板**，X8U 上**不弹**（用户实机确认）。但：
@@ -1690,6 +1696,13 @@ X10Filter: palette switch answered com.oplus.feature.color.palette.support = tru
 （`invokeOriginalMethod(f, "common")`）能反映 `CameraConfig.d` 上的钩子。
 
 #### 4.10.11 开关生效了，然后相机必崩 —— 结论：X8U 上不能在 Java 层开
+
+> **本节结论已被 §4.13 推翻**（2026-10-14）：崩溃**不是**因为 X8U 的原生件「处理不了调色盘」，
+> 也不是因为「缺 X9U 的 `libCombineLut*.so`」（两者逐字节相同，§4.13.2）。
+> 真正原因是模块漏合并了 `SimTool_Preview_Palette_Normal.ini`（glob 只匹配 `SimTool_Palette_*`），
+> palette 初始化因此失败，而 `processV3` 不检查初始化函数的返回值、直接拿**未初始化**的
+> `OutParam[0]` 去算 `new float[3n³]` —— §4.13.3。本节的现场记录（tombstone、dex pc 换算、
+> 「能走到崩溃点前提是开关为开」）仍然成立，保留不动。
 
 （2026-10-14 07:3x。钩子上挂后 40 秒内相机必崩，之后进入崩溃循环。）
 
@@ -1989,6 +2002,458 @@ dump 出来的原厂明文：**132,973 B，是 JSONC**（带两处 `//` 注释�
 
 ---
 
+### 4.13 调色盘崩机的真正原因（**第五个独立根因**，2026-10-14 定案）：`[PaletteSCLut]` 那个 ini 从来没被合并过
+
+本节推翻两处旧结论，其余是新增：
+
+1. **§4.10.11 的「X8U 的原生件处理不了调色盘、缺 X9U 的 `libCombineLut*.so`」** —— 两者逐字节相同（§4.13.2）。
+2. **§4.9/§4.10 里「X9U 有独一无二的 `processunit/palette` 原生栈」** —— 两个 SDK jar 也逐字节相同（§4.13.2）。
+
+真正的根因只有一条：**模块的 `post-fs-data.sh` 用 `SimTool_Palette_*.ini` 做 glob，而
+`libCombineLut.so` 里写死要打开的那个文件名是 `SimTool_Preview_Palette_Normal.ini`，不匹配这个
+glob，所以它从来没进过 `/odm/etc/camera/basictone/setting/`。** 少了它，palette 初始化失败，
+而 JNI 侧的 `processV3` **不检查初始化函数的返回值**，拿一个**从未被写过的 `OutParam[0]`**
+去算 `new float[3n³]` —— 崩的是这一行。
+
+#### 4.13.1 现场：两枚 tombstone 是同一条链上**相邻的两条指令**
+
+| 现场 | 信号 | 栈顶 | 帧 |
+|---|---|---|---|
+| `crash1.txt`（07:36:43，pid 23662，tid 23708 `UxThread-4`） | `signal 7 SIGBUS`, `BUS_ADRALN`, `esr: PC Alignment Exception`，pc = 垃圾地址 | `libCombineLut.so` `operator new(unsigned long)+96` → `__cxa_throw+112` | `#07 libCombineLutJni.so processV3+364` |
+| §4.10.11 记的那次（07:38:49 / 07:39:10，pid 25650 / 26153） | `signal 11 SIGSEGV`, `fault addr 0x0000000000000020 (read)` | `__memmove_aarch64_nt+592` | `#01 libCombineLutJni.so processV3+380` |
+
+`processV3` 在 `libCombineLutJni.so` 里是 `0x14D8`（`sz = 0x264`），所以：
+
+- `+364 = 0x16C` ⇒ pc `0x1644`；
+- `+380 = 0x17C` ⇒ pc `0x1654`。
+
+对着反汇编（`tools/elf_dis.py libCombineLutJni.so 14d8 173c`）：
+
+```
+00001624  ldr     w8, [sp]            ← OutParam[0] = 立方维（这里是未初始化的栈）
+00001628  mul     w9, w8, w8
+0000162c  mul     w8, w9, w8          ← dim³
+00001630  add     w22, w8, w8, lsl #1 ← 3·dim³
+00001638  cmp     xzr, x8, lsr #62
+0000163c  sbfiz   x21, x22, #2, #0x20
+00001640  csinv   x0, x21, xzr, eq    ← 32 位溢出就把请求改成 SIZE_MAX（等于「必抛」）
+00001644  bl      _Znam               ← ▶ SIGBUS 那次的 #07
+00001648  ldr     x1, [sp, #8]        ← OutParam[8] = float* 数据（同样是未初始化的栈）
+00001654  bl      memcpy             ← ▶ SIGSEGV 那次的 #01（fault addr 0x20）
+```
+
+两条指令挨着，两枚 tombstone 是同一次错误分配的两种结局：分配太大 ⇒ `bad_alloc` 抛出、
+展开器踩到坏 FDE（SIGBUS）；分配「不大但也没映射」⇒ 紧接着的 `memcpy` 读野指针（SIGSEGV）。
+**§4.10.11 当时把它读成「原生件读野指针」，方向对、归属错**：野指针来自 JNI 自己。
+
+#### 4.13.2 A/B 实证（推翻「缺 X9U 原生件」）
+
+`libCombineLut*.so` 不是「移植素材里没有」——**X8U 设备上跑的就是同一份文件**。
+从实机 `/product/lib64/` 拉下来与 X9U（PMA110）固件抽出的比对，**五个后端件全部逐字节相同**：
+
+| 文件（实机 `/product/lib64/`，`/product/app/*/`） | 大小 | md5 |
+|---|---|---|
+| `libCombineLut.so` | 429,512 | `34001cde1397d3f3e4f5a2420fef45da` |
+| `libCombineLutJni.so` | 9,928 | `6a1d3134fe3d697bd9981b501f58c369` |
+| `libPalette-Jni.so` | 370,440 | `ec315c5027ff78d23fb75cd4fb8ca2d6` |
+| `com.oplus.camera.unit.sdk.jar` | 5,319,483 | `f705b12945cae6b7aab6ca6115099f28` |
+| `com.oplus.camera.unit.sdk.adapter.jar` | 2,939,239 | `7a225bfbe824af118312ee67102f8c7d` |
+
+（tombstone 里的 BuildId `de235fcdbb02ebaeeb8d06d56c20fb16344bc979` 与两侧一致。）
+
+顺带清掉两条更早的误判：`ipusdk/processunit/filter/palette/PaletteColorTable` 在 `type_ids` 里被引用、
+在 `class_defs` 里**两侧都没有定义**（悬空引用，且全库没有任何指令引用它）；`PalettePanelView` /
+`PaletteColors` / `PaletteColorRecipe` 两侧都是「有引用、有定义」。**唯一真正的差异是相机 APK**，
+而且是 X8U 更新（7.006.123 `176,189,839` B / `2612ec0db45dfec068e29af2385bee68`
+vs X9U 7.006.119 `176,098,454` B / `43b48133eebd4c71bd120a09c567231b`），相差 33 个 dex +
+`resources.arsc` + 2 个 ogg。
+
+#### 4.13.3 反向啃出的整条链（`libCombineLut.so` == `CombineLut_V2.0.3.3`）
+
+这个 .so 没被剥离（成员函数在 `.dynsym` 里，类型是 `STT_OBJECT` 但 `shndx` 指 `.text`），
+所以可以直接定位。工具在 `G:/ColorOS17/x9u_extract/`：`elf_xref.py`（ADRP/ADD|LDR 交叉引用）、
+`elf_plt.py`（`.rela.plt` → PLT 桩名）、`elf_dis.py`（capstone 反汇编 + 字符串标注）。
+
+**调用链（V1 实现，即当前生效的那套）：**
+
+```
+Java  CombineLutHelper.process(IIIIFFF String[] int[])         ← Lut3dDataManager.e+0x15C 调
+JNI   processV3 @0x14d8
+        memset(sp+0x30, 0, 0x600)                              ← 64 个 std::string（reserved[]）
+        for i < min(GetArrayLength(String[]), 64):             ← 把 Java 的 String[] 拷进 reserved[]
+            reserved[i] = GetStringUTFChars(...)
+        CombineLut_Process(x0 = sp+0x10, x1 = sp, x2 = g_pBasicTone)
+C++   CombineLut_Process @0x3c154
+        if (!a1 || !a0 || !a2) { log "Process failed!"; return -1 }
+        BasicToneProcessNext(this = a2, ProcessPostParam = a0, OutParam = a1)
+C++   Param_BasicTone_Base::BasicToneProcessNext @0x28f78
+        逐条 log reserved[0..6]；解析 reserved[5] → iPaletteFlag，log "iPaletteFlag = %d"
+        if (iPaletteFlag == 0) → 普通 LMT/SC/CWCM/ODT 路径
+        else                   → BasicTonePaletteProcessNext @0x29ef0
+C++   BasicTonePaletteProcessNext                        (log "Palette mode!")
+        m_iPaletteFlag = ParseReservedFlag(reserved[5], "palette flag")     @0x2a1a0
+        m_iHDRFlag     = ParseReservedFlag(reserved[6], "HDR flag")
+        r = BasicTonePaletteMalloc(InitParam*)  @0x29ccc ; if (r) → "lutMallocPalette failed!" → return
+        fuseSCLut(PPP[0xc], PPP[0x10], m_pfSrcSCLut, m_ppfPaletteFrameSCLut, PaletteSCSize³)
+        MergeLutTet_resize2rgb(…, 64, PaletteSCSize, 0, 0x40000)
+        OutParam[0] = 64 ; OutParam[8] = 合并结果指针 ; log "Palette process success!"   ← 只有这条出口写 OutParam
+C++   BasicTonePaletteMalloc
+        read3DlutSet("SimTool_Preview_Palette_Normal.ini")   @0x2ff54
+        SCLutMallocPalette()   @0x2f97c
+        SCLutFrameMallocPalette() @0x2fbe4
+```
+
+**`ProcessPostParam` 的布局**（由 `reserved[i]` 的日志与 `+0x98/+0xb0` 的偏移反推，
+`0x98 = 0x20 + 5·0x18`、`0xb0 = 0x20 + 6·0x18`）：
+
+```
++0x00  ...                      +0x0C/0x10/0x14/0x18  四个 int（Java 的 IIII）
++0x14/0x18/0x1C               三个 float（Java 的 FFF）
++0x20  std::string reserved[64]      ⇒ reserved[5]="palette flag"，reserved[6]="HDR flag"
+```
+
+实机日志正好印证（崩溃那次 07:36:42.880）：
+
+```
+BasicToneProcessNext() pProcessParam->reserved[0] is empty   … [1]…[4] 同样 empty
+BasicToneProcessNext() pProcessParam->reserved[5]: 1
+BasicToneProcessNext() pProcessParam->reserved[6]: 1
+BasicToneProcessNext() … iPaletteFlag = 1
+```
+
+**`read3DlutSet(const char* name)` @0x2ff54** —— `snprintf(path, 0x200, "%s/%s", this+0x800, name)`，
+然后：
+
+- `m_iPaletteFlag != 0` 时**只**读 `[PaletteSCLut]` 的两个键：
+  `readIniKeyInt("PaletteSCLut","lut_size", path, &PaletteSCSize)` ⇒ log `PaletteSCSize: %d`；
+  `readIniKeyInt("PaletteSCLut","SCLutNum", path, &PaletteSCLutNum)` ⇒ log `PaletteSCLutNum: %d`；
+  并算 `[this+0xe78] = PaletteSCSize³`。
+- 否则读 `[LMTLut]`/`[SCLut]`/`[CMCWLut]`/`[ODTLut]`/`[Frame]`。
+- ⚠️ **`readIniKeyInt` 恒返回 0**（`@0x3c6b0`：`readIniKeyStr()` → `*out = atoi(buf)` → `mov w0, wzr`），
+  所以源码里那条 `if (rc) log "read3DlutSet failed"` 是**死代码**；文件打不开时
+  `readIniKeyStr` 把 buf 留空、`atoi("") == 0`，于是 **`PaletteSCSize` / `PaletteSCLutNum` 被写成 0**
+  而不是报错。**这是「静默降级成 0」而不是「失败」——整条链就是从这里失去防线的。**
+
+**`SCLutMallocPalette()` @0x2f97c**：`malloc(12 · PaletteSCSize³)`（**12 = 3 通道 × 4 字节**）
+载入**中性那张** `palette/<HDR|SDR>/SC<PaletteSCSize>Lut4`（`%s/%s/SC%dLut4`；`Sat = -100/0/100/`
+`Cont = -100/0/100/` 的 3×3 网格里，序号 4 恰好是 (0,0)）。HDR 子目录由 `reserved[6]` 选：
+`HDR flag == 0 → SDR`，否则 `HDR`。
+
+**`SCLutFrameMallocPalette()` @0x2fbe4**：`malloc(8 · PaletteSCLutNum)` 存指针数组，
+循环上界就是 `PaletteSCLutNum`（**不是写死的 9**），逐张 `palette/<HDR|SDR>/SC<PaletteSCSize>Lut<i>`
+malloc 同样大小再 `fread`，逐张 log `reading palette lut %s`。
+
+**尺寸自洽**（这是最有说服力的一条）：设备上 18 张色卡各 **49,152 B = 12 × 16³**，
+而 `lut_size = 16` ⇒ `malloc` 请求的正是 **12 × 4096 = 49,152**。数据与代码严丝合缝。
+
+#### 4.13.4 崩溃那一次的实机日志（决定性证据）
+
+同一进程 23662，崩溃（07:36:43.08）前 200 ms（07:36:42.880）：
+
+```
+BasicTonePaletteProcessNext() BasicTonePaletteProcessNext()
+BasicTonePaletteProcessNext() Palette mode!
+BasicTonePaletteMalloc() BasicTonePaletteMalloc()
+BasicTonePaletteMalloc() m_iPaletteMalloced = 0
+read3DlutSet() SimTool_Setting: /odm/etc/camera/basictone/setting/SimTool_Preview_Palette_Normal.ini
+readIniKeyStr() can't open ini file!                     ← ★ 文件不在
+read3DlutSet() PaletteSCSize: 0                          ← ★ 静默变 0
+readIniKeyStr() can't open ini file!
+read3DlutSet() PaletteSCLutNum: 0                        ← ★ 静默变 0
+SCLutMallocPalette() reading palette lut /odm/etc/camera/basictone/palette/HDR/SC0Lut4   ← ★ 去找 dim=0
+SCLutMallocPalette() can't open SC0 file!
+BasicTonePaletteProcessNext() lutMallocPalette failed!   ← ★ 失败出口：一次都不写 OutParam
+```
+
+`lutMallocPalette failed!` 之后走 `b 0x2a188`，**跳过** `OutParam[0] = 64`。
+再往后 `Process failed!` **一次都没出现**（全日志 grep = 0）——因为 `BasicToneProcessNext`
+返回的是 0（成功），`CombineLut_Process` 于是也返回 0，`processV3` 更不会察觉：
+它从来不检查返回值，直接读那个没被写过的 `OutParam[0]`。
+
+⇒ **`can't open ini file!` 与 `SIGBUS/SIGSEGV` 之间是完整的因果链，不是相关。**
+反过来说：**1.3.1 的钩子本身是好的**（`iPaletteFlag = 1`、`reserved[5]: 1` 都证明了），
+1.3.2 撤回钩子是把一个数据缺失问题误判成了能力缺失问题。
+
+#### 4.13.5 修法（1.3.4 已落）
+
+`module/post-fs-data.sh` 的 PKJ110 palette 分支：glob 改**具名拷贝**（glob 那行留着，另加一行具名）：
+
+```sh
+for INI in "$MODDIR/payload/x10_basictone/setting"/SimTool_Palette_*.ini \
+           "$MODDIR/payload/x10_basictone/setting"/SimTool_Preview_Palette_Normal.ini; do
+    [ -f "$INI" ] || continue
+    cp -a "$INI" "$BT_EXTRA/setting"/ 2>>"$LOG" || log "palette ini copy FAIL: $INI"
+done
+```
+
+同时补上「闸门为什么没拦住」的那一环：
+
+- `tools/verify_aura.py` 原本只断言 payload **里有** `SimTool_Preview_Palette_Normal.ini`，
+  没断言**合并脚本会拷它**。现加一条正向断言：`post-fs-data.sh` 里必须出现
+  `"$MODDIR/payload/x10_basictone/setting"/SimTool_Preview_Palette_Normal.ini`。
+- `tools/verify_port_artifacts.py` 的 `MODULE_SCRIPTS["post-fs-data.sh"]` 定值同步为
+  `(16430, 42e919f6c420d000d4b6099066e8755d)`。
+
+**这一步行为零变化**：钩子仍未下发 ⇒ `iPaletteFlag` 仍是 0 ⇒ palette 分支根本不进。
+它只是把路铺平。**要看到效果必须两件事一起做**：
+
+1. `symbols.json` 加回 `CameraConfig.flag` 指纹、重开 `CameraConfig.d` 钩子
+   （`PaletteFeatureSwitch.java` 现在放在 `.workbuddy/pal/pending/`，已从 `app/src` 移出）；
+2. **重启设备一次**加载新模块 APK —— LSPosed 会缓存模块 APK，实测热替换
+   `/data/adb/modules/omnicam_aura/*.apk` 完全无效（没有新日志、`module.prop` 也不触发重扫）。
+   重启是本工程的红线（§4.12.6），**必须由人点头**。
+
+免重启的旁路已经查到底、**都不通**：`CameraConfig.d → w → b → y` 里 `y` 的兜底是
+`FeatureApi.getProjectSupportFeatureValue` → 空 → `CameraUnitUtils.getVendorTagConfig`
+→ `CameraAdapterUtils.getVendorTagConfig` → `CameraConfigHelper.getConfigValue` →
+`sVendorTagMap`（vendor tag）→ `ApsUtils.sVendorTagConfigMap`，**最终仍回到 V2 容器那条死锁路**
+（§4.10.5），不是可写文件也不是可设属性。
+
+#### 4.13.6 纪律（本轮新增）
+
+1. **原生里写死的文件名，就不要用前缀 glob 去对应。** 要哪个具名拷哪个；
+   路径在 `.rodata` 里，`elf_strfind`/`elf_xref` 十分钟就能查清。
+2. **native 崩在 `operator new` / `memcpy` / `memmove` 时，先怀疑两件事**：
+   JNI **不检查返回值**，以及 **out 结构没被初始化就开始用**。
+   本例 `processV3` 把 `CombineLut_Process` 的返回值丢掉了，这是全案的放大器。
+3. **ini 读不到的语义是「0」，不是「失败」。** `readIniKeyInt` 恒返回 0，
+   于是「缺文件」会伪装成「配置为 0」，一路走到分配尺寸那里才炸。
+   看 native 日志要按 `XXX: 0` 这种**静默降级**去读，不要只找 `failed`。
+4. **断言「缺某个设备件」之前先 A/B md5。** §4.10.11 的「缺 X9U 原生件」是没做这一步得出的，
+   代价是 1.3.2 白撤回一版。
+
+#### 4.13.7 实机端到端验证：**调色盘在 PKJ110 上跑通了**（2026-10-14 17:43）
+
+§4.13.1–4.13.6 是「查明 + 铺路」。**本节是收口：B（端到端验证）成功。**
+
+用**测试 APK**（`local.omnicam.aura` 覆盖安装，带 `PaletteFeatureSwitch`：
+钩 `CameraConfig.d` 全部重载 + `FeatureApi` 兜底；**钩子靠硬编码类名定位，
+`symbols.json` 一个字节都没改** —— §4.13.5 第 1 条里「加回 `CameraConfig.flag` 指纹」的说法作废）
++ 1.3.4 的 payload 修复，在**照片模式**下点开滤镜：
+
+**① 门开了** —— 落盘日志 `/data/adb/lspd/log/modules_*.log`（**不随 logcat 缓冲滚掉**）：
+
+```
+X10Filter: palette switch: config parse version = 1
+X10Filter: palette switch installed on com.oplus.camera.configure.CameraConfig.d (+ FeatureApi net)
+X10Filter: palette switch: answering com.oplus.feature.color.palette.support = true
+HighPixelEffects: mode answers key_support_palette = true
+```
+
+**② 面板出来了** —— 截图 `/.workbuddy/pal/shots/02_palette_open.png`：
+顶栏 `影调 00 / 饱和度 00 / 柔光 无`，中间橙色色盘，底部 `重置 / 柔光`。
+
+**③ 引擎跑了、而且没崩** —— 照片模式每一帧：
+
+```
+BasicToneProcessNext() pProcessParam->reserved[5]: 1
+BasicToneProcessNext() iPaletteFlag = 1
+BasicTonePaletteProcessNext() Palette mode!
+BasicTonePaletteProcessNext() Palette process success!      ← 成功出口
+```
+
+统计：`Palette process success!` = 3、`iPaletteFlag = 1` = 3（缓冲只留得住这几条，
+实际每帧一次）、`Process failed / lutMallocPalette failed` = **0**、
+`logcat -b crash` 里 combineLut/palette = **0**、最新 tombstone 仍是 **10:26**（修复前那次）⇒ **零回归**。
+
+**④ 成片也带色** —— 用户实机确认「滑动调色盘颜色会变动，成片也带色」；
+截图 `03_palette_applied.png` 里 `影调 -49 / 饱和度 -9 / 滤镜强度 100`、滤镜 `琥珀`，画面明显暖调。
+
+##### 顺带查清的一条 UI 门（重要）
+
+调色盘的**可见性门**是 `FilterPresenter`（`Lbg/v`）的：
+
+```java
+X3() = mode.getSupportFunction("key_support_palette") && <UI 容器状态 lc/w.n1()>
+```
+
+而**照片模式**（`dm/w2`，即 `CommonMode`）的实现是：
+
+```java
+return "common".equals(modeName) && CameraConfig.d("com.oplus.feature.color.palette.support", false, false);
+```
+
+⇒ 照片模式下 `key_support_palette` **就等于那个 OCS key**，所以 **§4.10 的开关钩子是必要条件、且已经充分**。
+早先「面板里没有调色盘」不是缺门，是**没选中滤镜**（面板默认只显示滤镜卡片列表，
+`b0.setPaletteValuePanelVisible` 在选中滤镜后才被调）。`key_support_palette` 只有
+照片/人像/夜景三个模式类会答（`Ldm/w2` bit 9、`Lfm/x0` bit 5）。
+
+另发现一处**我方死代码**：`PaletteColors` / `PaletteSeekbarColors` 在 **X8U、X9U 两侧 APK 里都无任何引用**
+（`X10FilterPort.hookPaletteColors` / `hookPalette` 挂的是空靶子）；真正喂面板颜色的是
+`com/oplus/camera/common/gl/w0`（X9U 是 `Le9/h`）的 `get()` → `PaletteColorRecipe`。留着无害，但要知情。
+
+##### 新增纪律
+
+5. **`logcat` 是环形缓冲，取证要读落盘日志。** `logcat -d -b all` 也只留几分钟，
+   调色盘成功链很容易被冲掉；**LSPosed 的 `/data/adb/lspd/log/modules_*.log` 才是持久证据**。
+   顺序是：`su -c "logcat -c"` → 立刻操作 → 立刻抓。
+6. **「面板里没有」先问「是不是要点一下」。** 手艺人面板（大师/哈苏）多是二级结构：
+   入口 → 卡片列表 → 选中后才出调色盘。别把「没点」读成「不支持」。
+7. **`adb push` 在 `MSYS_NO_PATHCONV=1` 下，本地路径别用 `/g/...`**（会被当 `\g\...` 而 `cannot stat`），
+   用 `G:/...`。
+
+### 4.14 成片侧调色盘：B 收口为「预览可用、成片缺后端」，补法是**只换一个库**（1.3.5）
+
+§4.13.7 把**预览**跑通了，但同一份操作里按快门**成片不带色**。本节是 B 的收口与 C 的落地。
+
+#### 4.14.1 B 的结论：预览与成片是两条**完全独立**的实现
+
+两边根本不共用代码，这是本轮最省事的确定性结论：
+
+| | 预览 | 成片 |
+|---|---|---|
+| 库 | `/my_product/lib64/libCombineLut.so`（**相机 APK 自带**，429,512 B） | `/odm/lib64/libBasicTonePhoto.so`（**ODM 固件**，538,400 B） |
+| palette 符号 | `PaletteSCLut` / `PaletteSCLutNum` / `PaletteSCSize` / `SC%dLut4` / `SCLutMallocPalette` / `m_iPaletteFlag` **全在** | **全库 0 个 `Palette` 字串** |
+| 读的 ini | `SimTool_Preview_Palette_Normal.ini`（＝1.3.4 新建的那个） | 只认 `SimTool_Photo_{Normal,Master}.ini` / `SimTool_Dolby.ini` |
+| 结果 | 完全生效 | 不生效 |
+
+`SimTool_Palette_Photo_*.ini` 这三个名字**只**出现在 `libBasicTonePhotoX10.so`（X9U 后端）身上——
+既然 PKJ110 上跑的是 X8U 原厂库，1.3.4 摆进 `basictone/setting/` 的那三个 ini 就是**死载荷**：
+文件在、md5 对得上，但没有任何代码会打开它们。（真正有效的只有 `SimTool_Preview_Palette_Normal.ini`，
+它由预览侧的 `libCombineLut.so` 读。）
+
+**那"一点点区别"是什么**：`libAlgoInterface.so`（X8U 原厂 60 MB 版）里 palette 能力其实是**齐的**——
+`ipuColorPaletteProcess` / `PaletteFilterInfoState` / `applyPaletteBasicToneFailure` /
+`applyPaletteMeisheRenderFailure` / `finalizePaletteFilterInfoBasicToneOnly` /
+`mapCapModeToPaletteCamMode` / `palette_routing` 都在。它想做，但 basic-tone 那一步没人实现，
+于是落到 `finalizePaletteFilterInfoBasicToneOnly` 降级分支。轻微变化来自降级路径，**不是调色盘**。
+meishe 路也断：X8U 与 X9U 的 `libmsnativefilter.so` **都没有** palette 字串。
+
+#### 4.14.2 为什么模块里的 X9U 后端一直没生效 —— 是 `post-mount.sh` **故意**拦的
+
+不是 bug。`module/post-mount.sh` 的 PKJ110 分支原文是 `no library replacement`，还会主动
+`umount -l /odm/lib64` 并 purge `/mnt/vendor/mountify/odm/lib64`。原因是那段注释开头记的血案：
+
+> Overlaying the X9U pair put OmniCam's 8 KB router stub in that slot, so the stub dlopen'd X10 —
+> an X9U backend, created by the very same overlay — for X8U hardware. The preview pipeline stalled
+> there and the camera came up on a black frame with a frozen UI.
+
+本轮只读取证与之一致：
+
+```
+$ grep -E ' /odm/lib64/(libAlgoInterface|libBasicTonePhoto|libmsnativefilter)\.so ' /proc/self/mountinfo
+   (空 —— 三个库一个 bind 都没有，用的是固件原件)
+$ md5sum /odm/lib64/libBasicTonePhoto.so
+8651fa24fcd4990bafc9a01df3174dd5   ← X8U 固件件，与 payload/lib64 里的 e9cca775… 不同
+```
+
+#### 4.14.3 C 的可行性不是猜的：把两个库的 ABI 对开
+
+在动设备之前先把"能不能换"量出来。结论是**这一个能换，另外两个不能**：
+
+- **依赖相同**：两者 `DT_NEEDED` 完全一致 ——
+  `libsharebuffer/liblog/libGLESv3/libEGL/libdl/libc/libm`，**没有 X9U 特有依赖**。
+- **入口相同**：两库都导出**同样 39 个未修饰（C 风格）符号**，真正的入口是
+  **`getAlgoAPI`** + `OGLBasicToneProcess`。
+- **调用方用法**：`libAlgoInterface.so` 全文只有 **1 处** `libBasicTonePhoto` 字串，
+  且**没有任何 `BasicTone*` C++ 符号** ⇒ 它是 `dlopen` 按名加载、再从 `getAlgoAPI` 取接口表，
+  **不是链接期符号绑定**，所以库内部的签名变化碰不到它。
+- **导出差异只有 8 个**，且全在库内部：5 个 `readIniKey*` 挪进了 `basictone::` 命名空间（等价）、
+  1 个 libc++ 内部符号，真签名变化只有两个 ——
+  `BasicToneRender::init(...)` 多一个 `bool`、`BasicTone_OGL::loadLut(CamMode)` 变成
+  `loadLut(CamMode, char const*, bool)`。这两个**对外不可见**（上一条已证明），不构成风险。
+- X10 新增的正是缺的能力：`BasicTone::PaletteSCLutMalloc()` / `PaletteSCLutFrameMalloc()` /
+  `process_CPU` / `process_with_texture` / `preparePortraitMask` / `Map3dlut_*_with_mask`。
+- X10 也认 X8U 的 `SimTool_Photo_*.ini`，常规拍照路径有配置（实测
+  `read3DlutSet() SimTool_Setting: .../SimTool_Dolby.ini` 正常回读 `SCLutSize: 32`）。
+
+**关键判断**：当年黑屏的是 X9U **一整对**（`libAlgoInterface.so` 79 MB 也在内），而且落在
+`payload/lib64` 那个 8 KB router stub 的下面。本次**只动 `libBasicTonePhoto.so` 这一个**：
+AlgoInterface 与 msnativefilter 保持原厂，stub 不参与。
+
+#### 4.14.4 换完先崩了一次 —— GR hook 的**一次性守卫失效**（这才是真 bug）
+
+换库后第一次打开相机（pid 17167）崩了，日志给了完整因果：
+
+```
+19:22:38.142 E/RicohGrPort: native hook failed: _ZN13BasicTone_OGL7loadLutE7CamMode
+19:22:45.391 E/RicohGrPort: native hook failed: _ZN13BasicTone_OGL11processCoreEP5ImageS1_PvS2_
+19:22:45.950 F/libc: Fatal signal 11 (SIGSEGV), fault addr 0x0, tid 19433 (RefFrameProc)
+```
+
+tombstone 的调用链：
+
+```
+#00 pc 0  <unknown>                                        ← 调了空函数指针
+#01 libaura_native.so +0x22b94                             ← 我们自己的 shim
+#02 libBasicTonePhoto.so (OGLBasicToneProcess+36)
+#03 libBasicTonePhoto.so (basictoneOcce::ThreadWorker::run+240)
+```
+
+根因在 `app/src/main/cpp/gr_basictone.cpp` 的 `hookBasicTone()`：
+
+```c
+if (originalProcessCore && originalLoadLut) return;   // ← 旧守卫
+```
+
+它要求**两个** backup 都非空才短路。而 X10 后端把经典 `loadLut(CamMode)` 改了名，
+`dlsym` 找不到 ⇒ `originalLoadLut` **永远是 NULL** ⇒ 守卫**永远不生效** ⇒
+每次 `dlopen("libBasicTonePhoto*.so")` 都重跑一遍 `hookBasicTone`；第二次对**已经打过补丁**的
+`processCore` 再做 inline hook 会失败，而 LSPosed 在失败时**会把交给它的 backup 清空** ——
+于是第一条 hook 的分支还在，`originalProcessCore` 却成了 NULL，下一次 BasicTone 直接 `pc=0`。
+
+在 X8U 原厂库上撞不到：那边经典 `loadLut` 存在 → 守卫生效 → 只 hook 一次。
+**是"新库 + 老 hook"把这个潜伏缺陷顶了出来。**
+
+**修法（1.3.5）**：
+
+1. 换成独立的一次性标志 `basicToneHooked`，不再依赖 backup 是否双非空；
+2. `loadLut` **只在经典符号存在时**才挂，否则打一条 `loadLut classic symbol absent (X10 backend)`
+   并跳过（GR 的 LMT 路径切换在 X10 后端上本就不适用）；
+3. `processCore` / `loadLut` 两个 shim 开头各加 `if (!originalXxx) return 0;` 兜底。
+
+复测：连续 3 轮 `am force-stop` + 拉起相机，`hook_failed=0`、`sigsegv=0`。
+
+#### 4.14.5 落地的改动（1.3.5）
+
+| 文件 | 改动 |
+|---|---|
+| `app/src/main/cpp/gr_basictone.cpp` | 一次性守卫 + backup 校验 + shim 空指针兜底 |
+| `module/post-mount.sh` | PKJ110 分支新增 `bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhoto.so`（先 `umount` 可能的陈旧 bind），并改写那段"不替换"的注释 |
+| `tools/build_x8u_algo_switch_config.py` | 新增 `aps_algo_color_palette` 纯插入（文本级；`common/portrait/aiHighPixel`，共 5 处），`verify()` 允许且仅允许这一处 delta |
+| `module/payload_pkj110/oplus_camera_algo_switch_config`<br>`port-x8u/payload/oplus_camera_algo_switch_config` | 重新生成：141,474 → **141,729 B** / `593dbc79…` → **`10a2532d…`** |
+| `app/.../x10/PaletteFeatureSwitch.java` | 转正（注释里"待重测"的口吻改为结论） |
+| `tools/verify_aura.py` | 反向断言**反转**（开关必须在场）；新增"PKJ110 必须 bind X10"断言 |
+| `tools/verify_port_artifacts.py` | 定值同步：`post-mount.sh` 6620/`6d2dbca7…` → **9505/`2512f1bb…`**；配置 → **141729/`10a2532d…`** |
+| `module/module.prop` / `app/build.gradle.kts` | 1.3.4 → **1.3.5**（versionCode 10 → 11） |
+
+#### 4.14.6 实机验证（2026-10-14 19:23 起）
+
+换库 + `am force-stop` 后（**无需重启手机**），照片模式拍照，`libBasicTonePhoto.so` 侧日志：
+
+```
+BasicToneProcessNext() Param_BasicTone_Base::BasicToneProcessNext: iPaletteFlag = 1
+BasicTonePaletteProcessNext() Palette mode!
+BasicTonePaletteMalloc() BasicTonePaletteMalloc()
+read3DlutSet() SimTool_Setting: .../setting/SimTool_Preview_Palette_Normal.ini
+read3DlutSet() PaletteSCSize: 16 / PaletteSCLutNum: 9
+SCLutMallocPalette()      reading palette lut .../palette/HDR/SC16Lut4
+SCLutFrameMallocPalette() reading palette lut .../palette/HDR/SC16Lut0 … SC16Lut8
+fuseSCLut() SC1_2_4_5
+fuseSCLut() SC_coeff_0.000000_0.790000
+BasicTonePaletteProcessNext() Palette process success!
+```
+
+**9 张色卡全部加载成功**，没有一条 `Failed to open lut file` / `Unkown lut file`；
+`SC_coeff` 随调色盘滑动变化（`0.000000_0.790000`），用户主观确认**成片颜色变化明显**。
+
+#### 4.14.7 纪律（本轮新增）
+
+8. **"某功能不生效"先确认它落在哪条实现上。** X8U 上预览与成片用的是**两个不同的库**
+   （`libCombineLut.so` vs `libBasicTonePhoto.so`），一个生效推不出另一个。
+   `grep -a` 一下那个 `.so` 里有没有对应符号，5 秒就能定性。
+9. **判断"能不能换库"不要靠推测，去比 `.dynsym` 与 `DT_NEEDED`。**
+   本轮先量出"39 个 C 接口零差异 + 依赖相同 + 调用方走 `getAlgoAPI`"，才敢在一个曾经黑屏过的地方
+   动手。反例正是当年：只看到"都叫 libBasicTonePhoto.so"就换，没注意 X9U 版
+   `BasicToneRender::init` 的签名不同。
+10. **inline hook 的"一次性"守卫不能依赖 backup 是否非空。** 目标库换名/换签名时 `dlsym` 会失败，
+    那种情况下 backup 永远是 NULL，守卫形同虚设 —— 重复 hook 一个已打补丁的地址，失败即清 backup，
+    随后就是 `pc=0`。用独立 bool，并且在 shim 里兜底。
+11. **只换一个文件的实验，先用运行时 `mount --bind` + `am force-stop` 试，不要先改脚本等重启。**
+    出问题 `umount` 就回来，不改盘、不重启手机；确认有效再固化进 `post-mount.sh`。
+
+---
+
 ## 5. 符号层（Java / LSPosed）：209/210 原样可用（**前提是被测 APK 为 7.006.94**）
 
 > **版本前提（务必先看）**：本节数字来自 `G:/ColorOS17/x8u_extract/OplusCamera.apk`，
@@ -2103,6 +2568,10 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
       `593dbc7913682da175663d708b005120`），`post-fs-data.sh` 对 PKJ110 无条件 bind。
       实机 POP / 照片 / 大师三模式回归通过，`preview config is null` 33 → 0。
 - [ ] **X10 调色盘：Java 层开不了，卡在 X8U 自己的原生 LUT 合成器**（§4.10）。
+      > **本条结论已被 §4.13 推翻（2026-10-14）**：X8U 与 X9U 的后端件逐字节相同，
+      > 缺口是模块漏 merge 了 `SimTool_Preview_Palette_Normal.ini`；崩点在 `processV3`
+      > 用**未初始化**的 `OutParam[0]` 决定 `float[]` 大小。下列历史记录保留不动，
+      > 当前状态见本条末尾的 2026-10-14 更新。
       1.3.0 的容器方案会把相机锁死（主线程 `ConditionVariable.block()`，§4.10.5）；
       1.3.1 改用 Java 侧回答 `com.oplus.feature.color.palette.support`（落点是 `CameraConfig.d`，
       不是 `FeatureApi`，见 §4.10.10），**开关确实生效**（`paletteMode()` 变 true），
@@ -2112,6 +2581,14 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-25.0.3'
       要真正做成，**前置条件是拿到 X9U（PMA110）那份能处理调色盘组合的
       `/product/lib64/libCombineLut.so` + `libCombineLutJni.so`**，本工程素材里没有。
       把面板单独显示出来（不动 `CameraConfig.d`）是可行的，但选色不会有任何效果，故不做。
+
+      **[2026-10-14 更新]** 上面这段到「本工程素材里没有」为止仍是历史记录。当前状态：
+      1.3.4 起 `post-fs-data.sh` **具名合并** `SimTool_Preview_Palette_Normal.ini`（补充上述
+      「4 个 ini」的口径：payload 里其实是 4 个，其中带 `[PaletteSCLut]` 的那个一直被 glob 漏掉）。
+      这一步**行为零变化**——钩子仍未下发，palette 分支根本不会进——它只是把路铺平。
+      要验证效果必须**同时**：① `symbols.json` 加回 `CameraConfig.flag` 指纹并重开
+      `CameraConfig.d` 钩子；② **重启设备一次**（LSPosed 缓存模块 APK，热替换 APK 实测无效）。
+      重启是本工程的红线，见 §4.12.6，必须由人决定。
 - [ ] `libmsnativefilter.so` 是否要替换（模块 10.96 MB vs 设备 7.99 MB）——默认不换。
 - [ ] 实机验证 `frame+0x18` / `object+0x008` 两处写操作（静态一致，但仍属高风险写）。
 - [ ] `Zoom.labelBitmaps` 用的是类型级多命中，若后续机型把非缓存 Bitmap 也放进 `ZoomSeekBar`，

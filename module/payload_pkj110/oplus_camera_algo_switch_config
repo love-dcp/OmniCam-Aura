@@ -9,6 +9,8 @@
                 {
                     "id" : 0,
                     "enable" : 1,
+
+                    "aps_algo_color_palette" : 1,
                     "aps_algo_blurless" : 0,
                     "aps_algo_portraitrepair" : 0,
                     "aps_algo_bokeh" : 0,
@@ -62,6 +64,8 @@
                 {
                     "id" : 1,
                     "enable" : 1,
+
+                    "aps_algo_color_palette" : 1,
                     "aps_algo_blurless" : 0,
                     "aps_algo_portraitrepair" : 0,
                     "aps_algo_bokeh" : 0,
@@ -200,6 +204,8 @@
                 {
                     "id" : 0,
                     "enable" : 1,
+
+                    "aps_algo_color_palette" : 1,
                     "aps_algo_blurless" : 0,
                     "aps_algo_portraitrepair" : 0,
                     "aps_algo_bokeh" : 1,
@@ -236,6 +242,8 @@
                 {
                     "id" : 1,
                     "enable" : 1,
+
+                    "aps_algo_color_palette" : 1,
                     "aps_algo_blurless" : 0,
                     "aps_algo_portraitrepair" : 0,
                     "aps_algo_bokeh" : 0,
@@ -883,6 +891,8 @@
                 {
                     "id" : 0,
                     "enable" : 1,
+
+                    "aps_algo_color_palette" : 1,
                     "aps_algo_blurless" : 0,
                     "aps_algo_portraitrepair" : 1,
                     "aps_algo_bokeh" : 0,
