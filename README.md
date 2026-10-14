@@ -26,11 +26,11 @@ APK 没有 Activity、启动入口或设置界面，功能固定启用。
 
 | | PMA110（Find X9 Ultra） | PKJ110（Find X8 Ultra） |
 |---|---|---|
-| 配置来源 | `payload/`，完整配置集 | `payload_pkj110/`，两份按 X8U 原厂数据重新生成的配置；调色盘开关**不开**（原因见下「X10 调色盘调谐」行） |
-| 后端库 | 用模块自带的 X9U 后端覆盖 `/odm/lib64` | **完全不改**，X8U 自己的库即真实后端 |
+| 配置来源 | `payload/`，完整配置集 | `payload_pkj110/`，两份按 X8U 原厂数据重新生成的配置（含 1.3.5 追加的 `aps_algo_color_palette`） |
+| 后端库 | 用模块自带的 X9U 后端覆盖 `/odm/lib64` | 只换一个：`libBasicTonePhoto.so` 绑到 X9U 的 X10 后端；`libAlgoInterface.so` 与 `libmsnativefilter.so` 保持原厂 |
 | ISP 调谐 | 挂载 `com.qti.tuned.lighthouse*.bin` | 不下发（X8U 用逐传感器的 `com.qti.tuned.zf*.bin`） |
 | gamma 表 | 挂载 | 不下发（逐传感器曲线不同） |
-| X10 调色盘调谐 | merge | 只 merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_*Palette*.ini`；`lmt/` 保持原厂。**开关仍不开**：1.3.1 试过在 Java 层回答 `com.oplus.feature.color.palette.support`，开关确实生效，但随即在 X8U 自己的 `libCombineLutJni.processV3` 里原生崩溃。**1.3.4 查出了真因**：不是「X8U 缺能处理调色盘的原生件」（五个后端件与 X9U **逐字节相同**），而是模块原先用 `SimTool_Palette_*.ini` 做 glob，漏合并了原生写死要打开的那一个 `SimTool_Preview_Palette_Normal.ini`；已补上具名合并，**开关未下发故行为零变化**。详见 [`port-x8u/README.md`](port-x8u/README.md) §4.13 |
+| X10 调色盘调谐 | merge | merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_*Palette*.ini`（含 1.3.4 补上的具名 `SimTool_Preview_Palette_Normal.ini`），`lmt/` 保持原厂。**预览与成片两侧都已生效**：预览走相机 APK 自带的 `libCombineLut.so`；成片缺的从来不是原生件，而是「带 palette 的后端」，1.3.5 换掉 `libBasicTonePhoto.so` 后成片才真正出彩。详见 [`port-x8u/README.md`](port-x8u/README.md) §4.13 与 §4.14 |
 | Pro video ISZ | 启用 | 跳过（未在 X8U 上验证过） |
 
 **一条硬规则：凡是设备相关的后端库都不能放进模块的 `system/` 目录。** KernelSU 的
@@ -39,7 +39,8 @@ APK 没有 Activity、启动入口或设置界面，功能固定启用。
 叠成「X9U 的 8 KB 路由桩去 dlopen X10 后端」，预览停住、取景黑屏。这三个库因此放在
 `payload/lib64/`，由 `post-mount.sh` 只在 PMA110 上 bind；`system/` 只保留
 `libBasicTonePhotoX9/X10.so` 两个惰性文件（overlay 是唯一能「凭空创建」路径的机制，X9U 需要它们
-做 bind 目标，而 X8U 的库不引用这两个名字）。
+做 bind 目标，而 X8U 的库不引用这两个名字）。**`metamount.sh` 由元模块提供**（官方 KernelSU
+v3.0+ 起自身不再挂载模块），所以这棵 `system/` 树要生效就得先配一个元模块，见上面「安装」。
 
 PKJ110 的完整移植过程、两条 POP 故障的根因分析（配置层 `usecase_info` 畸形、native 层
 `dlopen(NULL)` 空指针）、POP「浓郁」滤镜缺失色卡的处置，以及 **X8U 调色盘崩机的真正根因**
@@ -47,6 +48,12 @@ PKJ110 的完整移植过程、两条 POP 故障的根因分析（配置层 `use
 [`port-x8u/README.md`](port-x8u/README.md)，后者详见 §4.13。
 
 ## 安装
+
+**前置条件：KernelSU 需要配一个元模块（metamodule）。** 官方 KernelSU v3.0+ 起
+**自身不再挂载模块**，改由元模块负责；只有带 `system/` 目录的模块才需要它，而本模块正是
+（`system/odm/lib64/` 下放着两个惰性后端文件，理由见下节）。请在安装本模块**之前**把元模块装好
+——本工程实测组合是 [mountify](https://github.com/backslashxx/mountify)，并保持它默认的
+`FAKE_MOUNT_NAME`（`post-mount.sh` 按这个名字清工作区）。元模块同一时刻只能装一个。
 
 1. 在 KernelSU 中安装发行页的模块 ZIP。
 2. 安装同一发行版的 APK，并在 LSPosed 中启用 Aura，勾选相机和相册作用域。

@@ -2452,6 +2452,59 @@ BasicTonePaletteProcessNext() Palette process success!
 11. **只换一个文件的实验，先用运行时 `mount --bind` + `am force-stop` 试，不要先改脚本等重启。**
     出问题 `umount` 就回来，不改盘、不重启手机；确认有效再固化进 `post-mount.sh`。
 
+### 4.15 元模块（metamodule）：`system/` 树得有东西来挂
+
+**结论**：本模块**必须**配合一个**元模块**使用，实测组合是 **mountify**。
+
+官方 KernelSU（v3.0+，本机正是）与 ReSukiSU **自身不再挂载模块**，把挂载委托给元模块；
+元模块的挂载入口是接口固定脚本名 `metamount.sh`，由激活的元模块提供。官方 FAQ 的口径是
+**只有需要挂载（改系统文件）的模块才需要元模块**，纯脚本 / sepolicy / `system.prop` 的模块
+不需要 —— 本模块带着 `module/system/`，正属于前者。（来源：kernelsu.org `guide/metamodule`。
+KernelSU-Next 与 SukiSU-Ultra 仍内置挂载，不受这条约束。）
+
+**为什么这两个文件不能像 §3 那三个一样搬走**：`system/` 里只剩
+`odm/lib64/libBasicTonePhotoX9.so` 与 `libBasicTonePhotoX10.so`。PMA110 的
+`payload/lib64/libBasicTonePhoto.so` 是个 8,960 B 的 router stub，它 `dlopen` 的是
+**`/odm/lib64/` 下这两个固定路径**，而 X9U 原厂并没有这两个文件 ——
+**overlayfs 是唯一能在只读分区上"凭空创建"路径的机制**，所以它们只能靠 `system/` 树 + 元模块
+变出来。§3 那条"设备相关的库必须搬出 `system/`"约束的是
+`libBasicTonePhoto/AlgoInterface/msnativefilter` 三个**真后端**，它们仍在 `payload/lib64/`、
+由 `post-mount.sh` 按机型 bind；这两个**惰性名字**留在 `system/` 是另一回事。
+
+**本机实测组合**（2026-10-14）：
+
+| 项 | 值 |
+|---|---|
+| 元模块 | `mountify` v2.0.3（`backslashxx/mountify`），`module.prop` 里 `metamodule=true` |
+| 模式 | `mountify_mounts=2`（auto：挂载所有带 `system/` 目录的模块） |
+| 工作区 | `/mnt/vendor/mountify`（`FAKE_MOUNT_NAME="mountify"`） |
+| mountify 自报 | `modules: OPlusHapticsEnhancer omnicam_aura` |
+
+`mountify` 不是唯一选择（官方参考实现 `meta-overlayfs`、第三方的 `meta-hybrid_mount` 提供同一
+接口，同一时刻**只能有一个**元模块生效），但**本工程的脚本与它的工作区路径有耦合**，见下。
+
+**耦合点：PKJ110 分支按名字找 mountify 的工作区。** 那段清场要
+`rm -f /mnt/vendor/mountify/odm/lib64/{libBasicTonePhoto,libAlgoInterface,libmsnativefilter}.so`
+（把冻结在工作区里的 X9U 三件套清掉，防下一次 metamount 重建 overlay 又盖回来），
+路径**写死**自 `FAKE_MOUNT_NAME="mountify"`。改成别的名字或换元模块，这一步会失配
+（`[ -f ]` 保护下只是静默 no-op），若工作区里确实冻着 X9U 三件套，`/odm/lib64` 会被重新污染。
+**⇒ 用 mountify，且不要动 `FAKE_MOUNT_NAME`。**
+另一半 `umount /odm/lib64` 是按挂载点 `grep " /odm/lib64 " /proc/self/mounts` 判断的，
+与元模块身份无关，换元模块仍然有效。
+
+**一条容易搞错的事实**：PKJ110 上 `system/` 树在**运行时不参与**。脚本 bind 的**源**是
+`$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so`（模块目录内的路径，不经 overlay），
+所以即便 `/odm/lib64/libBasicTonePhotoX9.so` / `X10.so` 不存在，PKJ110 的调色盘照常工作。
+2026-10-14 软重启后实测就是这个状态：`grep " /odm/lib64 " /proc/self/mounts` 无输出、
+两个文件 `No such file or directory`，而成片侧 `Palette process success!` 正常。
+那两行留在 `system/` 的意义**全在 PMA110**。
+
+**纪律（本轮新增）**：
+
+12. **凡是写安装步骤的地方都要写明"需要一个元模块"**，并指认识别实测组合（mountify）。
+    这是用户侧的硬前置条件，不是可选优化——官方 KernelSU 不装元模块时 `system/` 树根本不生效。
+13. **不要改 mountify 的 `FAKE_MOUNT_NAME`**：改了 `post-mount.sh` 的工作区清理会静默失配。
+
 ---
 
 ## 5. 符号层（Java / LSPosed）：209/210 原样可用（**前提是被测 APK 为 7.006.94**）

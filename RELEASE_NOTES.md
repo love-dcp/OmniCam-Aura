@@ -8,6 +8,21 @@
 补法是把 X9U 的那个后端按原厂文件名 bind 上去；同时修掉一个被这次换库顶出来的 native hook 缺陷
 （重复 hook 导致 `pc=0` 崩溃），并把调色盘开关正式下发给 PKJ110。
 
+## 前置条件：KernelSU 需要一个元模块
+
+本模块带 `system/` 目录（`system/odm/lib64/libBasicTonePhotoX9.so` 与
+`system/odm/lib64/libBasicTonePhotoX10.so`），而**官方 KernelSU v3.0+ 起自身不再挂载模块**，
+改由**元模块**（metamodule）负责 —— 挂载入口是元模块提供的 `metamount.sh`。官方口径是
+「只有需要挂载（改系统文件）的模块才需要元模块」，本模块正属于前者：`system/` 里那两行是
+X9U 的 8 KB router stub 要 `dlopen` 的固定路径，而 X9U 原厂并没有这两个文件，
+**overlayfs 是唯一能在只读 `/odm` 上凭空创建路径的机制**。没装元模块，这棵树不会生效。
+
+**安装前请先把元模块装好。** 本工程实测组合是
+[mountify](https://github.com/backslashxx/mountify) v2.0.3（`mountify_mounts=2` auto 模式），
+并**保持它默认的 `FAKE_MOUNT_NAME="mountify"`** —— `post-mount.sh` 的 PKJ110 分支按这个名字
+清工作区 `/mnt/vendor/mountify/odm/lib64`，改名或换元模块会让这一步静默失配。
+同一时刻只能有一个元模块生效。完整取证见 `port-x8u/README.md` §4.15。
+
 ## 本次变更（1.3.5 · 成片侧调色盘 + 修掉换库顶出来的 GR hook 崩溃）
 
 > 承接 1.3.4：那一版让**预览**里的调色盘活了，但成片仍然不变色。本节是成片侧的收口，

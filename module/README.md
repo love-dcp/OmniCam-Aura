@@ -1,4 +1,4 @@
-# OmniCam Aura 1.3.4
+# OmniCam Aura 1.3.5
 
 ## 适用组合
 
@@ -13,28 +13,46 @@
 模块启动时会自行判定机型，同一个包可直接在两台设备上使用，判断结果显示在模块目录下的
 `mount.log` 与 `bind.log` 里（`profile=PMA110` 或 `profile=PKJ110`）。
 
-安装此 KernelSU 模块后，安装同版配套 APK `omnicam-aura-1.3.4.apk`，在 LSPosed 中启用并勾选相机
-`com.oplus.camera` 和相册 `com.coloros.gallery3d`，然后重启。Aura 与 Muse 只能启用其一。
+## 安装
+
+**前置条件：KernelSU 需要配一个元模块（metamodule）。** 官方 KernelSU v3.0+ 起
+**自身不再挂载模块**，改由元模块负责（挂载入口是元模块提供的 `metamount.sh`）；只有带
+`system/` 目录的模块才需要它，而本模块正是——`system/odm/lib64/` 下的
+`libBasicTonePhotoX9/X10.so` 要靠 overlay 才能在只读的 `/odm` 上"凭空出现"（X9U 的 router stub
+要 `dlopen` 这两个路径，见下节）。**没装元模块，这棵 `system/` 树不会生效。**
+
+1. 先在 KernelSU 里装好一个元模块。本工程实测组合是
+   [mountify](https://github.com/backslashxx/mountify)（v2.0.3，`mountify_mounts=2` auto 模式），
+   并**保持它默认的 `FAKE_MOUNT_NAME`**——`post-mount.sh` 的 PKJ110 分支按这个名字去清它的工作区
+   `/mnt/vendor/mountify/odm/lib64`。元模块同一时刻只能装一个。
+2. 安装本模块 ZIP。
+3. 安装同版配套 APK `omnicam-aura-1.3.5.apk`，在 LSPosed 中启用并勾选相机
+   `com.oplus.camera` 和相册 `com.coloros.gallery3d`。
+4. 重启设备。
+
+Aura 与 Muse 只能启用其一。
 
 ## 两个机型档案的差别
 
 - **PMA110**：与以往版本行为完全一致。`payload/` 提供完整配置，`/odm/lib64` 下的
-  `libBasicTonePhotoX9/X10.so` 由系统 overlay 创建，`libBasicTonePhoto.so`、`libAlgoInterface.so`、
-  `libmsnativefilter.so` 由 OmniCam 自己的副本 bind 覆盖，ISP 调谐（`com.qti.tuned.lighthouse*.bin`）
-  与 gamma 表也会挂载；专业视频 ISZ 补丁在此档案上生效。
-- **PKJ110**：不改任何后端库（"只 hook"路线）。PKJ110 没有 `X9/X10` 后端，其
-  `/odm/lib64/libBasicTonePhoto.so` 就是真实后端，而 OmniCam 那份是只负责 dlopen 的 8 KB 路由桩，
-  挂上去会让 BasicTone 直接失败。配置文件改从 `payload_pkj110/` 取（两份按 PKJ110 原厂数据重新
-  生成的 GR 条目）。调色盘开关 `com.oplus.feature.color.palette.support` **目前仍不开**，但
-  **不再是"缺件"**：X8U 的 OCS 是 "config parse version 1"，
-  `CameraConfigure.getProjectSupportFeatureValue()` 对 `com.oplus.feature.*` 一律返回 null
-  （`sVendorTagMap` 只由 v2 解码器填充），1.3.1 试过在 Java 层回答这一个 key —— **开关确实生效，
-  但相机随即在 basic tone 初始化时原生崩溃**。**1.3.4 查清了真正原因**：不是 X8U 的原生件不行
-  （X8U 与 X9U 的五个后端件**逐字节相同**），而是模块原先用 `SimTool_Palette_*.ini` 做 glob 合并，
-  漏掉了原生代码写死要打开的那一个 `SimTool_Preview_Palette_Normal.ini` ⇒ `PaletteSCSize/SCLutNum`
-  被静默读成 0、分配失败，而 JNI 的 `processV3` 又不检查返回值，拿未初始化的 `OutParam[0]`
-  去 `new float[3n³]` 才崩。1.3.4 已补上这个 ini 的**具名合并**。**开关仍未下发 ⇒ 行为零变化**；
-  要真开需"重开钩子 + 重启设备一次"，重启是本工程红线、需人工确认。
+  `libBasicTonePhotoX9/X10.so` 由元模块的 overlay 创建，`libBasicTonePhoto.so`、
+  `libAlgoInterface.so`、`libmsnativefilter.so` 由 OmniCam 自己的副本 bind 覆盖，
+  ISP 调谐（`com.qti.tuned.lighthouse*.bin`）与 gamma 表也会挂载；专业视频 ISZ 补丁在此档案上生效。
+- **PKJ110**：**只换一个后端库**。把 `system/odm/lib64/libBasicTonePhotoX10.so` bind 到
+  `/odm/lib64/libBasicTonePhoto.so`（原厂文件名），`libAlgoInterface.so`（60,867,488 B）与
+  `libmsnativefilter.so` 保持 X8U 原厂——当年黑屏的是 X9U 的**一整对**（AlgoInterface 也在其中），
+  本次不涉及。理由是 X8U 原厂那个库**一个 `Palette` 字串都没有**：调色盘在预览里是对的（预览走
+  相机 APK 自带的 `libCombineLut.so`），按快门成片却不带色，缺的是后端实现而不是参数，
+  再怎么调也够不到。X9U 的 X10 后端可顶替是**量出来的**而不是猜的：两者 `DT_NEEDED` 相同、
+  导出的 39 个未修饰 C 符号零差异（入口 `getAlgoAPI` / `OGLBasicToneProcess`），
+  调用方 `libAlgoInterface.so` 是 `dlopen` 按名取接口、不含任何 `BasicTone*` C++ 符号，
+  所以库内部签名变化碰不到调用方。
+  配置文件改从 `payload_pkj110/` 取（两份按 PKJ110 原厂数据重新生成的 GR 条目；
+  `oplus_camera_algo_switch_config` 在 1.3.5 追加了 `aps_algo_color_palette`，
+  `common`/`portrait`/`aiHighPixel` 共 5 个 capture entity）。
+  调色盘开关 `com.oplus.feature.color.palette.support` 由
+  `local.jiege.hook.x10.PaletteFeatureSwitch` 在 Java 侧回答 `"true"`，
+  **预览与成片两侧都已生效**（详见 `../port-x8u/README.md` §4.14）。
   **切勿**再从盘上放 `oplus_camera_feature_config`（V2 容器）：那会把取值路径切到"等待一个尚未
   打开的条件变量"，进程内首次取特性值即死锁（详见 `port-x8u/README.md` §4.10，崩溃证据见 §4.13）。
   ISP 与 gamma 因属逐传感器数据而 **不下发**；`x10_basictone/` **只 merge 调色盘那一半**
@@ -42,7 +60,7 @@
   与 `SimTool_Preview_Palette_Normal`），逐机型的 `lmt/` tone 表保持 X8U 原厂；专业视频 ISZ 补丁
   **跳过**（它逐字节匹配 PMA110 的 `CameraHWConfiguration.config`，且未在 X8U 上验证过）。
 
-> **注意**：凡是设备相关的后端库都**不能**放进模块的 `system/` 目录。KernelSU 的 `metamount.sh`
+> **注意**：凡是设备相关的后端库都**不能**放进模块的 `system/` 目录。`metamount.sh`
 > 会把 `system/` 下的树无条件叠加到系统分区，脚本没有机会按机型拦截。三个 X9U 后端因此放在
 > `payload/lib64/`，由 `post-mount.sh` 在 PMA110 上 bind；`system/` 只保留 `libBasicTonePhotoX9/X10.so`
 > 两个惰性文件（overlay 是唯一能"凭空创建"路径的机制，X9U 需要它们做 bind 目标）。
