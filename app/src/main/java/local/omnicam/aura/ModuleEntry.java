@@ -5,8 +5,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import local.jiege.hook.common.CameraSessionProbe;
 import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Symbols;
+import local.jiege.hook.diag.PaletteProbe;
 import local.jiege.hook.filters.FilterGroupInjector;
 import local.jiege.hook.masterfilter.MasterPresetListSync;
+import local.jiege.hook.master.MasterPalette;
 import local.jiege.hook.gr.GrPort;
 import local.jiege.hook.highpixel.HighPixelEffects;
 import local.jiege.hook.pop.PopPort;
@@ -31,10 +33,12 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             MasterPresetListSync.install(loader);
             X10FilterPort.installCamera(loader);
             PaletteFeatureSwitch.installCamera(loader);
+            Log.guard("MasterPalette", "install", () -> MasterPalette.install(loader));
             HighPixelEffects.installCamera(loader);
             TiltShiftCapture.installCamera(loader);
             SeamlessBlurGuard.installCamera(loader);
             GrPort.installCamera(loader);
+            Log.guard("PalProbe", "install", () -> PaletteProbe.install(loader));
         }
     }
 }

@@ -1344,7 +1344,7 @@ positive_hdr_master_a_1.bin / _d_1.bin     PRO_FILTER_TYPE_POSITIVE_HDR_PATH
   （`portra400_hdr_normal_a_1.bin` 等 8 个全在），说明"滤镜更新包"只给了 portra/黑白，
   **没给 positive**；
 - 原始 X9U 工程包 `OmniCam-Aura-main.zip` 里也只有那 16 个 meishe_lut 文件，
-  同样没有 `positive_*` —— 即原版在 X9U 上是**靠 ODM 自带**，所以作者没打包，
+  同样没有 `positive_*` —— 即原版在 X9U 上是**靠 ODM 自带**，所以那两份工程包都没有打包，
   移植到 X8U 后就露出来了。
 
 结论：`positive_*` 是 X9/X10 世代的 ODM 资源；X8U 的相机 APK 与 X9 共用代码，
@@ -1845,7 +1845,7 @@ BaseMode.m8 依次撞两处（两处都实测到）：
 `Pc(bb.g)`（`BaseMode.java:3168`）只在 `q ∈ {73,92,97} && T0 != -1` 时才为 false，POP 的
 `q=0 T0=-1` ⇒ `Pc=true` ⇒ 必然走 `b == getCameraId()`。
 
-#### 4.11.3 为什么 GR 没事、POP 有事（这条解释了"POP 是拍照模式的子类"）
+#### 4.11.3 为什么 GR 没事、POP 有事
 
 `fm/y1`(POP) 与 `fm/v1`(照片) 都直接继承 `dm/w2`(=`CommonCapMode`)，是**兄弟**，不是父子；
 POP 多出来的只有 `m8` 里那段 `this instanceof fm.y1`（以及 `Jg` 里同内容、但由 `s3` 门控、
@@ -2480,7 +2480,7 @@ KernelSU-Next 与 SukiSU-Ultra 仍内置挂载，不受这条约束。）
 | 工作区 | `/mnt/vendor/mountify`（`FAKE_MOUNT_NAME="mountify"`） |
 | mountify 自报 | `modules: OPlusHapticsEnhancer omnicam_aura` |
 
-`mountify` 不是唯一选择（官方参考实现 `meta-overlayfs`、第三方的 `meta-hybrid_mount` 提供同一
+`mountify` 不是唯一选择（社区另有 `meta-overlayfs`（官方参考实现）与 `meta-hybrid_mount`，提供同一
 接口，同一时刻**只能有一个**元模块生效），但**本工程的脚本与它的工作区路径有耦合**，见下。
 
 **耦合点：PKJ110 分支按名字找 mountify 的工作区。** 那段清场要
@@ -2506,6 +2506,112 @@ KernelSU-Next 与 SukiSU-Ultra 仍内置挂载，不受这条约束。）
 13. **不要改 mountify 的 `FAKE_MOUNT_NAME`**：改了 `post-mount.sh` 的工作区清理会静默失配。
 
 ---
+
+### 4.16 大师模式：补上必崩的 LMT 缺口，并把调色盘"旁挂"进来（1.3.6）
+
+#### 4.16.1 先归因：大师模式拍照必崩与调色盘无关
+
+控制组实测：大师模式**不碰调色盘**、直接按快门，**照样崩**；同一台机点开调色盘再拍也崩。
+所以这是"换了 `libBasicTonePhoto.so` 后端"带出来的**资产缺口**，不是调色盘引起的。
+
+现场（`logcat` + tombstone）：
+
+```
+E basictone: [ERROR] [OCCE] [BasicTone.cpp] 534 LMTLutFrameMallocDynamic() can't open LMT file!
+E basictone: [ERROR] [OCCE] [BasicTone.cpp] 1156 readLMTLut() CurrLutname_LMTLut0_1_2_3
+F libc: Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0  in tid … (RefFrameProc)
+  #00 BasicTone::readLMTLut(int,int)+3996   /odm/lib64/libBasicTonePhoto.so
+  #05 libaura_native.so
+```
+
+- **调用方**：PKJ110 上模块把 `/odm/lib64/libBasicTonePhoto.so` 换成了 X10 后端
+  （`module/system/odm/lib64/libBasicTonePhotoX10.so`）。
+- **缺口**：X10 的扁平路径是 `%s/LMTPhotoLut0`，X8U 原厂是 `%s/LMTLut0`。**大师模式**的 setting
+  没有 `[SensorInfo]` ⇒ `LMTUseSensor = 0` ⇒ 不走 `Photo/Sensor%d/` 那条，直接落到扁平路径；
+  而 X8U 的 `lmt/` 只有 `LMTLut0..3`（另有 `Photo/Sensor{0..N}/LMTLut0..7`），**没有 `LMTPhotoLut*`**
+  —— 1.3.5 合并 `basictone` 时**故意跳过 `lmt/`**，于是大师模式每一张都撞在这里。
+- **照片模式为什么不中招**：`SimTool_Photo_Normal.ini` 里 `LMTUseSensor = 0/1/2/3/`，解析落到
+  X8U 已经有的 `Photo/Sensor%d/LMTLut*`。
+
+**修法**：`post-fs-data.sh` 的 PKJ110 分支新增只拷 `payload/x10_basictone/lmt/LMTPhotoLut*` 的块。
+这些名字在 X8U 的 `lmt/` 里**不存在**，所以是**纯新增**、不覆盖任何原厂文件，仍保持"撤掉 bind 即回滚"。
+实机验证走的是免重启路径（热塞进活绑定源 `/data/adb/omnicam_aura/merged/basictone/lmt/`）：**装上就不再崩**。
+
+#### 4.16.2 原厂那条调色盘门在大师模式是死路
+
+内置调色盘真身是 `Lut3dDataManager.f(String mode)` ≈
+`CameraConfig.d("com.oplus.feature.color.palette.support") && mode ∈ {common, portrait, night}`
+—— 模式是**硬编码白名单**。照片模式当初能修好，只是因为 `common` 本来就在白名单里；大师模式
+`professional` 不在，**答 feature key 一点用都没有**。把 `f()` 强行 hook 成 true 会放行 native
+调色分支，结果是**照片那套色卡套到大师滤镜上、预览发雾**（已实测）。⇒ 内置 UI 路线在大师模式不可用。
+
+#### 4.16.3 落地：旁挂一个独立入口，不碰原厂门、不碰 APS
+
+`app/src/main/java/local/jiege/hook/master/MasterPalette.java`：
+
+- 钩 `Activity.onResume`，只在 `com.oplus.camera.Camera` 上挂一个小按钮（锚在大师右侧菜单按钮附近，
+  仅当"大师 presenter"存在时显示，切出大师即消失）。
+- 点开时 `newInstance` 相机自带的 `PalettePanelView` + `PaletteColors.get(filterType)`，
+  `setCurrentToneAndSaturation` 回填当前值；拖动经
+  `presenter.a(value, key)`（`n9.f.P0` 影调 / `n9.f.O0` 饱和度）写回**大师 presenter**，
+  32 ms 合并后再下发。
+- **混淆名按相机版本分支**：7.006.94（ROM 17.0.0.101/102）与 7.006.123X（本机 104）不同 ——
+  `ef.m→ff.n`、`ef.m$b→ff.n$b`、`rp.k0→tp.k0`、`em.p0→fm.q0`、`yg.a→zg.a`、
+  `com.oplus.camera.x6→w6`、方法 `f0→c0`/`R5→Q5`、静态
+  `com.oplusos.sau.common.utils.a#h → r1.d#l`（第 4 参 `Integer`→`Object`）。实现用
+  `findClassIfExists("ff.n")` 自动判版。
+- 开关：`persist.omnicam.aura.masterpalette`，**设为 0 关闭**（此时不安装任何钩子，行为与 1.3.5 一致）。
+
+#### 4.16.4 布局是"量"出来的，不是照着截图猜的
+
+为此在同一个类里加了一个**视图树快照**工具：改 `persist.omnicam.aura.paldump` 的值即抓一次
+（另有自动触发点：相机进程启动、原厂照片模式调色盘出现、我们的盘打开、原厂滤镜页出现）。
+快照逐项记录 decor 树里各控件的 `id / 类名 / 显隐 / 坐标 / 尺寸 / translationY / scale / alpha`。
+**注**：快照只在 `paldump` 有值时输出，默认不写日志。
+
+量出来的对照（1080×2376，density 480 ⇒ 1dp=3px）：
+
+| 控件 | 原厂照片模式·带调色盘 | 大师模式（原状） |
+|---|---|---|
+| 预览 `frame_layout` | `[0,330 1080x1440]` | **完全一致（不移动）** |
+| `control_panel_layout` | `[0,1485]` **ty=-285** | `[0,1770]` ty=0 |
+| `shutter_button` | `[441,1554 198x198]` | `[441,1839 198x198]` |
+| 模式条 / 变焦行 / 参数行 / 缩略图 / 顶栏 / Auto-Pro 开关 | 全部隐藏 | 均在 |
+| 调色盘 `palette_panel_view` | `[396,1836 288x288]`（=96dp） | — |
+| 底部左/右按钮（重置 / 柔光） | `[120,1932]` / `[852,1932]` 108x157 | — |
+
+⇒ 大师模式侧照此实现：控制条上移 **95dp**（= `dimen/palette_control_view_translation_4_3`）、
+隐藏模式条+变焦行+参数行、盘放在"控制条位移后顶 + 351px"、并把**缩略图平移到盘行左侧**
+（即原厂"重置"那个位置），关盘时逐项还原。**"预览变小并上移"其实是错觉**：预览帧一直没动，
+变的是被隐藏的控件与被上移的控制条。
+
+两处 UI 细节也是量出来的：
+
+- **预览圆角卡片**：原厂是**左右各内缩 42px(14dp)、圆角 48px(16dp)、上下不内缩**。预览画面来自全屏的
+  `gl_root_view`，outline/`clipToOutline` 对它无效 ⇒ 用一个遮罩 View（`Path` + `EVEN_ODD`：
+  整矩形减内缩圆角矩形）把四角与两侧涂黑，观感与原厂一致。
+- **顶部读数**：直接 inflate 原厂 `layout/palette_value_panel`（含 `string/tone` 影调、
+  `string/camera_master_saturation` 饱和度、`PaletteRollingNumView`），隐藏其中"柔光"一组；
+  剩下两组落在 **x 291..639**，正好在顶栏图标之间 ⇒ **不必隐藏大师模式的顶栏**。
+
+#### 4.16.5 与相机自身 UI 的互斥（滤镜页那一处）
+
+调色盘那层"点一下关闭"的遮罩是**全屏可点视图**：一旦它吃掉 `ACTION_DOWN`，**整串手势都归它**，
+底下滤镜页的横滑 pager 就再也收不到 `MOVE`。处置有两条：
+
+1. **提前收**（主）：钩 `android.view.View#performClick` 的 `beforeHookedMethod`，点击落在**相机
+   自身 UI**（且不在我们的盘/按钮子树内）时先 `hide()` 再让相机执行——否则相机是在"控制条还上移着"
+   的那一刻把滤镜页建起来的，会把当时的几何记进页面的触摸区，**结果只有上半屏能划**（实测症状）。
+2. **兜底**：tick（250 ms）里检测到原厂滤镜页控件出现（`effect_style_*` / `switch_filter_view` /
+   `style_filter_view`）也收起。
+
+#### 4.16.6 纪律（本轮新增）
+
+- **改布局先取快照**：任何"看起来移位/变小"的现象，先用 `paldump` 快照拿坐标，别照截图估量——
+  本轮"预览变小并上移"就被证明是隐藏控件+控制条上移造成的错觉。
+- **借来的东西要还**：位移与显隐都要记原值，`hide()` 一律还原（`controlBar.setTranslationY(0)`、
+  `Map<View,Integer> hidden` 回填、缩略图回原位）。
+- **遮罩类可点视图会独占手势**：凡是盖在相机自身可滑动区域上的点击层，都要先确认不会把横滑吞掉。
 
 ## 5. 符号层（Java / LSPosed）：209/210 原样可用（**前提是被测 APK 为 7.006.94**）
 

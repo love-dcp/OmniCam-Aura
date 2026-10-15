@@ -215,9 +215,7 @@ else
     # into operator new[](SIZE_MAX) (or a huge mmap that then faults), and the camera dies in
     # bad_alloc/the copy right after -- the SIGBUS+SIGSEGV pair in README 4.13.1.
     #
-    # lmt/{LMTPhotoLut*,SCLut*} is deliberately NOT merged: those are per-device tone tables read
-    # straight by BasicTone/AlgoInterface, and X8U already has its own lmt/ (including SC16Lut0),
-    # so dropping X10's set in risks the kind of pipeline stall the library overlay used to cause.
+    # lmt/ is merged only for the names X8U stock does not have -- see the LMTPhotoLut block below.
     # GR's own setting_Retro/ is merged above, as before.
     if [ -d "$MODDIR/payload/x10_basictone/palette" ]; then
         mkdir -p "$BT_EXTRA/palette" "$BT_EXTRA/setting"
@@ -231,6 +229,26 @@ else
         log "palette extra: $(find "$BT_EXTRA/palette" -type f | wc -l) cards, $(ls "$BT_EXTRA/setting" | wc -l) inis"
     else
         log "palette skip: no payload"
+    fi
+
+    # X8U's own lmt/ carries LMTLut*/SC16Lut*/SC32Lut*, but the X10 libBasicTonePhoto.so this
+    # profile binds opens "%s/LMTPhotoLut0" on the flat path (the master settings carry no
+    # [SensorInfo], so LMTUseSensor is 0 and the per-sensor Photo/Sensor%d/ branch is skipped).
+    # X8U stock has no LMTPhotoLut*, so EVERY master-mode capture died in BasicTone::readLMTLut:
+    #   basictone: LMTLutFrameMallocDynamic() can't open LMT file!
+    #   basictone: readLMTLut() CurrLutname_LMTLut0_1_2_3
+    #   SIGSEGV (fault addr 0x0) in thread RefFrameProc
+    # Photo mode is unaffected because its settings list LMTUseSensor = 0/1/2/3/ and resolve to the
+    # per-sensor files X8U already ships. Only the X10-only name is copied, so nothing X8U has is
+    # replaced -- drop the bind to revert. Verified live 2026-10-15 on PKJ110: with LMTPhotoLut0..3
+    # present, master capture no longer crashes (control run without them crashed every shot).
+    if [ -d "$MODDIR/payload/x10_basictone/lmt" ]; then
+        mkdir -p "$BT_EXTRA/lmt"
+        for LUT in "$MODDIR/payload/x10_basictone/lmt"/LMTPhotoLut*; do
+            [ -f "$LUT" ] || continue
+            cp -a "$LUT" "$BT_EXTRA/lmt"/ 2>>"$LOG" || log "lmt copy FAIL: $LUT"
+        done
+        log "lmt extra: $(ls "$BT_EXTRA/lmt" 2>/dev/null | wc -l) files"
     fi
 fi
 bind_merged_dir /odm/etc/camera/basictone "$BT_EXTRA" "$MERGED_ROOT" basictone /odm/etc/camera/basictone

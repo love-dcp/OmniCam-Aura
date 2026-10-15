@@ -70,7 +70,7 @@ PMA110_PAYLOAD = {
     ),
 }
 MODULE_SCRIPTS = {
-    "post-fs-data.sh": (16430, "42e919f6c420d000d4b6099066e8755d"),
+    "post-fs-data.sh": (17561, "2d6badf8a370eba9b1c64b0bec982f7f"),
     "service.sh": (6798, "4a71d4eead6cefba07c3d3f09e1ed74d"),
     "post-mount.sh": (9505, "2512f1bb1acd1fcb8f4c798c932a0e89"),
     # Device-side repair/diagnostics for the POP regression; shipped so the fix can also be
