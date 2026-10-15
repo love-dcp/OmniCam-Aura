@@ -30,7 +30,7 @@ APK 没有 Activity、启动入口或设置界面，功能固定启用。
 | 后端库 | 用模块自带的 X9U 后端覆盖 `/odm/lib64` | 只换一个：`libBasicTonePhoto.so` 绑到 X9U 的 X10 后端；`libAlgoInterface.so` 与 `libmsnativefilter.so` 保持原厂 |
 | ISP 调谐 | 挂载 `com.qti.tuned.lighthouse*.bin` | 不下发（X8U 用逐传感器的 `com.qti.tuned.zf*.bin`） |
 | gamma 表 | 挂载 | 不下发（逐传感器曲线不同） |
-| X10 调色盘调谐 | merge | merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_*Palette*.ini`（含 1.3.4 补上的具名 `SimTool_Preview_Palette_Normal.ini`），`lmt/` 保持原厂。**预览与成片两侧都已生效**：预览走相机 APK 自带的 `libCombineLut.so`；成片缺的从来不是原生件，而是「带 palette 的后端」，1.3.5 换掉 `libBasicTonePhoto.so` 后成片才真正出彩。详见 [`port-x8u/README.md`](port-x8u/README.md) §4.13 与 §4.14 |
+| X10 调色盘调谐 | merge | merge `palette/{HDR,SDR}` 色卡与 4 个 `SimTool_*Palette*.ini`（含 1.3.4 补上的具名 `SimTool_Preview_Palette_Normal.ini`），`lmt/` 保持原厂。**预览与成片两侧都已生效**：预览走相机 APK 自带的 `libCombineLut.so`；成片缺的从来不是原生件，而是「带 palette 的后端」，1.3.5 换掉 `libBasicTonePhoto.so` 后成片才真正出彩。详见移植笔记 §4.13 与 §4.14 |
 | Pro video ISZ | 启用 | 跳过（未在 X8U 上验证过） |
 
 **一条硬规则：凡是设备相关的后端库都不能放进模块的 `system/` 目录。** KernelSU 的
@@ -44,8 +44,8 @@ v3.0+ 起自身不再挂载模块），所以这棵 `system/` 树要生效就得
 
 PKJ110 的完整移植过程、两条 POP 故障的根因分析（配置层 `usecase_info` 畸形、native 层
 `dlopen(NULL)` 空指针）、POP「浓郁」滤镜缺失色卡的处置，以及 **X8U 调色盘崩机的真正根因**
-（模块漏合并了一个被原生代码写死文件名的 ini，而不是缺原生件）见
-[`port-x8u/README.md`](port-x8u/README.md)，后者详见 §4.13。
+（模块漏合并了一个被原生代码写死文件名的 ini，而不是缺原生件）见本工程的移植笔记
+（`port-x8u/README.md`，随工程本地保留，不在仓库内发布），后者详见 §4.13。
 
 ## 安装
 
