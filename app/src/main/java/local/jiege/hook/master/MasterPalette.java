@@ -21,8 +21,10 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -30,29 +32,70 @@ import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
 
 /**
- * Palette entry for master ("professional") mode on PKJ110.
+ * Palette entry for master ("professional"), POP ("retroCamera") and video ("commonVideo") on PKJ110.
  *
  * <p>The stock filter menu only offers the palette in common/portrait/night: its gate is
  * {@code Lut3dDataManager.f(String mode)} = {@code CameraConfig.d("com.oplus.feature.color.palette.support")
- * && (mode is common|portrait|night)}. Master mode is "professional", so the gate is shut and it is
- * a hard-coded mode list - answering the feature key (what {@code PaletteFeatureSwitch} does for
- * photo) changes nothing here, and forcing {@code f()} for "professional" makes the native palette
- * backend run against master filters and fogs the preview. The built-in UI route is therefore a dead
- * end for master.
+ * && (mode is common|portrait|night)}. Master mode is "professional" and POP is "retroCamera", so
+ * neither is on that list - it is a hard-coded mode list, answering the feature key (what
+ * {@code PaletteFeatureSwitch} does for photo) changes nothing for them, and forcing {@code f()} open
+ * makes the native palette backend run against those modes' filters and fogs the preview. The
+ * built-in UI route is therefore a dead end for both.
  *
  * <p>This class goes the other way round: it never touches the stock gate or the APS configuration.
  * It hangs its own small button on the camera window, and when tapped instantiates the app's own
- * {@code PalettePanelView}, fills it with the recipe from {@code PaletteColors.get(filterType)} and
- * pushes tone/saturation straight into the master presenter with {@code presenter.a(value, key)} -
- * keys {@code n9.f.P0} / {@code n9.f.O0}. The presenter already accepts palette writes, so only the
- * UI entry point was missing in master mode.
+ * {@code PalettePanelView}, fills it with the recipe from {@code PaletteColors.get(filterType)}, and
+ * then writes tone/saturation the same way the camera's own menu does. That write is small: the
+ * app's callback for the two palette keys ({@code n9.f.P0} / {@code n9.f.O0}) only calls
+ * {@code Lut3dDataManager.t}/{@code .z} with the value and notifies the mode object with
+ * {@code H4}/{@code x6} - the settings store is used for the other keys (filter, soft light), not
+ * for tone and saturation. So the panel writes through {@code ef.m$b} when the pro presenter is
+ * alive, and straight into the LUT manager when it is not.
  *
- * <p>Once the panel is up the layout is arranged exactly like the camera's own palette: the control
- * panel is lifted by {@code dimen/palette_control_view_translation_4_3} (which is what moves the
- * shutter out of the way - the preview frame itself never moves), the mode strip, the zoom row and
- * the manual-parameter rows are hidden, the preview is masked into a rounded card, the app's own
+ * <p>That fallback is what makes POP work from a cold start. The pro presenter {@code ef.m} is built
+ * in exactly one place, the feature factory {@code gb.d0.c}, and only for the pro feature; a session
+ * that boots into POP never creates one, so an entry point bound to it would only appear after a
+ * detour through master mode. Tone and saturation do not need it - they live in the LUT manager's
+ * {@code w} / {@code v} - so POP gets its own path and no longer depends on visit order.
+ *
+ * <p>Presenters are matched by class, not just by mode name: the camera keeps one per feature and
+ * they all share the base class this module hooks ({@code kc.y} / {@code lc.w}), so POP alone brings
+ * up a dozen of them, all reporting {@code retroCamera}. Only {@code ef.m} is accepted.
+ *
+ * <p>The entry point follows tone and saturation rather than the page. Master goes through its pro
+ * presenter. Every page that has none - POP, and the video page, whose pro feature is never built -
+ * is served straight from the LUT manager, since that is where the two values live. What differs
+ * between the two is the arrangement: only master has room for the camera's lifted layout, the
+ * others keep theirs and dock the dial in the strip under the shutter.
+ *
+ * <p>The video page needs one more thing before any of that shows. On the pages the palette ships
+ * on, the preview renderer is handed the combined LUT and the viewfinder applies it; on the video
+ * page the camera leaves that argument null, so the palette is computed and then dropped - the
+ * values land, the native backend runs its whole palette path ("Palette process success!"), and the
+ * picture does not move. The camera also refuses to initialise the environment there itself: its
+ * renderer's own call returns without doing anything, flags or no flags. So the environment is
+ * brought up directly and the preview task is handed the table, which is the same object the other
+ * pages get - no camera gate is touched and the other pages are left alone.
+ *
+ * <p>That covers the viewfinder only, which is half of it: the clip is written by a backend the
+ * app's rendering never reaches unless a video filter is in play. The record processor picks its
+ * backend from its recorder config, and the default one hands MediaCodec to the HAL
+ * ("vendor.qti-ext-enc-info-native_recording = 1"), so the encoder is fed from the sensor side and
+ * nothing the app draws can end up in the file. The app-codec backend is fed from the app's own
+ * pipeline, and the camera reaches for it by itself only when it has a filter to compute - which is
+ * why a video page clip picks up the palette as soon as any filter is selected. While the dial has
+ * been used on the video page the one config entry that picks the backend is answered here, so the
+ * palette reaches the clip without a filter. See the recorder hook in {@link #install}.
+ *
+ * <p>In master the panel layout is arranged exactly like the camera's own palette: the control panel
+ * is lifted by {@code dimen/palette_control_view_translation_4_3} (which is what moves the shutter
+ * out of the way - the preview frame itself never moves), the mode strip, the zoom row and the
+ * manual-parameter rows are hidden, the preview is masked into a rounded card, the app's own
  * 影调/饱和度 readout is inflated along the top edge, and the thumbnail is parked in the palette
- * row. Every number here was measured on the device with the layout snapshot in {@link #PROP_DUMP}.
+ * row. POP has no room for that lift - its preview card ends at 1590 and its filter strip fills
+ * 1590..1770, so raising the control panel would drive the shutter onto the strip - so there the
+ * dial docks in the empty band under the shutter and only the mode strip steps aside. Every number
+ * here was measured on the device with the layout snapshot in {@link #PROP_DUMP}.
  *
  * <p>The obfuscated names differ between camera builds: 7.006.94 (ROM 17.0.0.101/102) uses
  * {@code ef.m}/{@code rp.k0}/{@code em.p0}/{@code yg.a} and the methods {@code f0}/{@code R5}, while
@@ -65,6 +108,7 @@ import local.jiege.hook.common.Log;
  */
 public final class MasterPalette {
     private static final String TAG = "MasterPalette";
+    /** The name predates POP support; the switch covers both modes. Empty (unset) means on. */
     private static final String PROP = "persist.omnicam.aura.masterpalette";
     /** Changing this property's value makes the camera print one layout snapshot (calibration). */
     private static final String PROP_DUMP = "persist.omnicam.aura.paldump";
@@ -75,13 +119,26 @@ public final class MasterPalette {
     };
     /**
      * Views the camera itself hides while its own (photo mode) palette is up - measured with the
-     * paldump tree dump: the mode strip, the zoom row over the preview and the manual-parameter
-     * rows. Without hiding the last two they keep floating over the preview.
+     * paldump tree dump: the mode strip, the zoom row over the preview, the manual-parameter rows
+     * and the whole top bar. Without hiding the first two they keep floating over the preview, and
+     * without hiding the top bar its flash / aperture / sound-focus switches end up underneath the
+     * 影调-饱和度-滤镜强度 readout we inflate at the same height, which makes both unreadable -
+     * photo mode swaps the two, it does not show them together.
      */
     private static final String[] PALETTE_HIDE_IDS = {
         "headline_view", "headline_background",
         "zoom_seek_bar",
         "professional_params_bar_container", "professional_param_slide_bar_container",
+        "oplus_setting_bar",
+    };
+    /**
+     * POP and the video page only give up their mode strip and the top bar: the preview card and the
+     * retro filter strip are the page, so everything else stays. The strip keeps working because the
+     * click-catcher stops above it.
+     */
+    private static final String[] RETRO_HIDE_IDS = {
+        "headline_view", "headline_background",
+        "oplus_setting_bar",
     };
     /** How far the camera lifts the control panel while its palette is up: dimen/palette_control_view_translation_4_3. */
     private static final int PALETTE_PANEL_LIFT_DP = 95;
@@ -96,7 +153,7 @@ public final class MasterPalette {
     /**
      * The app's own 影调/饱和度 readout, shown along the top edge while its palette is up. Inflating
      * the layout keeps the labels (string/tone, string/camera_master_saturation), font and spacing
-     * identical; its two groups sit at x 291..639, i.e. clear of the top bar icons either side.
+     * identical, and it takes the top bar's place rather than sharing it - see the hide lists.
      */
     private static final String READOUT_LAYOUT = "palette_value_panel";
     private static final String READOUT_LAYOUT_ALT = "palette_value_panel_multi_language";
@@ -121,12 +178,35 @@ public final class MasterPalette {
         "headline_view", "zoom_seek_bar", "professional_params_bar_container",
         "palette_panel_view", "palette_menu_root", "frame_layout",
     };
+    /** The retro-camera (POP) page root, used to tell us which mode we are looking at. */
+    private static final String[] RETRO_UI_IDS = {
+        "retro_camera_ui", "retro_camera_filter_scrollview",
+    };
+    /**
+     * The camera's right-hand menu button in each mode; the palette button anchors above it. Looked
+     * up by id first - the reflection walk in {@link #anchor} only sees buttons the effect container
+     * keeps as fields, which is not true for every mode.
+     */
+    private static final String[] ANCHOR_IDS = {
+        "camera_menu_right_enter_button", "camera_menu_right_enter_button_soft_light",
+        "camera_menu_right_enter_button_retro_effect", "camera_menu_right_enter_button_filter",
+    };
 
     private static ClassLoader loader;
     private static boolean camera123;
     private static boolean diagnostics;
     private static final List<WeakReference<Object>> presenters = new ArrayList<>();
     private static final List<WeakReference<Object>> containers = new ArrayList<>();
+    /** Log-once guard for the calibration lines. */
+    private static final Set<String> rendererSeen = new HashSet<>();
+    /** The preview renderer, needed to hand its pipeline a combined LUT - see {@link #applyPreviewLut}. */
+    private static volatile WeakReference<Object> rendererRef = new WeakReference<>(null);
+    /**
+     * The recorder-config key whose read decides how the clip is encoded. See {@link #install} -
+     * the camera's video recorder picks its backend from this one entry, and only two of the
+     * backends can carry the palette into the file.
+     */
+    private static Object appCodecKey;
     private static WeakReference<Session> session = new WeakReference<>(null);
 
     private MasterPalette() {}
@@ -143,6 +223,20 @@ public final class MasterPalette {
         diagnostics = !dump.isEmpty() && !"0".equals(dump);
         camera123 = XposedHelpers.findClassIfExists("ff.n", classLoader) != null;
         try {
+            // Every presenter of this family derives from the abstract base (kc.y / lc.w) and gets
+            // its mode name through that constructor, so hooking the base catches the ones the
+            // feature factory builds for modes this module knows nothing about - POP among them.
+            // ff.n itself is built in exactly one place (gb.d0.c) and only for the pro feature, so
+            // the narrower hook below alone leaves a POP-only session with no presenter at all.
+            try {
+                XposedBridge.hookAllConstructors(cls("kc.y"), new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        presenters.add(new WeakReference<>(param.thisObject));
+                    }
+                });
+            } catch (Throwable error) {
+                Log.i(TAG, "presenter base hook skipped " + error);
+            }
             XposedBridge.hookAllConstructors(cls("ef.m"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     presenters.add(new WeakReference<>(param.thisObject));
@@ -153,6 +247,160 @@ public final class MasterPalette {
                     containers.add(new WeakReference<>(param.thisObject));
                 }
             });
+            // Lut3dDataManager.f(mode) is the camera's own palette whitelist -
+            // "com.oplus.feature.color.palette.support" && (common|portrait|night). Pages outside it
+            // (POP, video) never get the palette branch of p() to run, so a write would land in the
+            // LUT manager's fields and change nothing on screen. While our presenter-free palette is
+            // docked we answer the gate ourselves; the moment it closes the camera has its own answer
+            // back, and master - which does have a presenter and already passes the gate - is never
+            // touched because the flag only follows the presenter-free path.
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.oplus.camera.common.utils.Lut3dDataManager", loader, "f", String.class,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            if (directPaletteOpen) param.setResult(Boolean.TRUE);
+                        }
+                    });
+            } catch (Throwable error) {
+                Log.i(TAG, "palette gate hook skipped " + error);
+            }
+            // Calibration: record the pair the camera itself passes to the tone-environment
+            // initialiser, so the fallback above can be checked against it.
+            try {
+                XposedHelpers.findAndHookMethod(
+                    "com.oplus.camera.common.utils.Lut3dDataManager", loader, "e",
+                    int.class, int.class, String.class, new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            Log.i(TAG, "camera tone env init " + param.args[0] + ","
+                                + param.args[1] + " mode=" + param.args[2]);
+                        }
+                    });
+            } catch (Throwable error) {
+                Log.i(TAG, "tone env hook skipped " + error);
+            }
+            // The preview renderer only initialises the basic-tone environment when the camera tells
+            // it to (nn.l.y0's first argument, taken from nn.l.l, which is derived from the mode).
+            // The video page is told to skip it, and Lut3dDataManager.p() bails out on its very first
+            // line when the environment is not up - so a palette write there changes fields and
+            // nothing else. Asking for the environment on the video page is the whole fix: from then
+            // on p() rebuilds the combined LUT exactly as it does in the modes that ship the palette.
+            try {
+                Class<?> renderer = cls("nn.l");
+                if (renderer == null) throw new IllegalStateException("renderer class missing");
+                XposedHelpers.findAndHookMethod(renderer, "y0", int.class, boolean.class, boolean.class,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            // Only for the handle. The camera answers y0 by mode and returns without
+                            // initialising anything on the pages it keeps the palette off, so the
+                            // call cannot be talked into doing the work: measured, flipping its flags
+                            // changed nothing. The manager has to be initialised directly (see
+                            // ensureToneEnv), and the preview task has to be handed the LUT (see
+                            // applyPreviewLut) - which needs this renderer.
+                            rendererRef = new WeakReference<>(param.thisObject);
+                            if (diagnostics && rendererSeen.add("req/" + param.args[0])) {
+                                Log.i(TAG, "renderer env request mode="
+                                    + rendererMode(param.thisObject) + " flag=" + param.args[0]);
+                            }
+                        }
+                    });
+            } catch (Throwable error) {
+                Log.i(TAG, "renderer hook skipped " + error);
+            }
+            // The preview task carries the combined LUT as its fourth argument. The camera passes
+            // null there on the pages it keeps the palette off - measured: the photo page builds it
+            // as "flag1=true lut=786432", the video page as "flag1=false lut=null", same class, same
+            // construction site, one empty argument - so the palette is computed and then dropped.
+            // Handing the task the manager's own table is what puts the palette on the video
+            // viewfinder; it runs only while our dial is up there, so no other page is touched.
+            try {
+                Class<?> task = cls("nn.f");
+                if (task == null) throw new IllegalStateException("preview task class missing");
+                XposedBridge.hookAllConstructors(task, new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        Object[] args = param.args;
+                        if (args.length < 4) return;
+                        Object table = args[3];
+                        if (diagnostics && rendererSeen.add("task/" + (table == null) + "/" + args[1])) {
+                            Log.i(TAG, "preview task built flag1=" + args[1]
+                                + " lut=" + (table instanceof float[]
+                                    ? String.valueOf(((float[]) table).length) : String.valueOf(table)));
+                        }
+                        if (table != null || !wantPreviewLut()) return;
+                        Object manager = lut();
+                        if (manager == null) return;
+                        float[] combined = combinedLut();
+                        if (combined == null) return;
+                        args[1] = Boolean.TRUE;
+                        args[2] = XposedHelpers.getIntField(manager, "t");
+                        args[3] = combined;
+                        Log.i(TAG, "preview task given the combined LUT (" + combined.length + ")");
+                    }
+                });
+            } catch (Throwable error) {
+                Log.i(TAG, "preview task hook skipped " + error);
+            }
+            // The clip itself, as opposed to the viewfinder. Recording has several backends and
+            // only one of them can carry our LUT into the file. `om.e0` (the camera's record
+            // processor) builds its recorder config through `om.c0.a(om.z)` and then picks the
+            // backend from three of those entries, in this order:
+            //     is_use_fast_video_recorder (`om.e0$g.c`) -> 3
+            //     is_use_media_codec         (`om.e0$g.b`) -> 2
+            //     video_stream_media_codec   (`om.e0$g.V`) -> 4
+            //     neither                                  -> 1
+            // Backend 1 is the native recorder: MediaCodec is configured with
+            // "vendor.qti-ext-enc-info-native_recording = 1", so the HAL feeds the encoder's input
+            // surface itself and nothing the app renders can reach it. Backend 2 configures
+            // MediaCodec with "mbUseCameraMediaCodec: true" instead, which means the encoder is fed
+            // from the app's own pipeline - the very pipeline the palette is on. Measured on the
+            // device: a clip recorded on backend 1 came out untoned (frame chroma 52.5 against the
+            // 54.4 baseline while the dial sat at -100), while backend 2 followed the dial exactly
+            // (dial at tone +100 / saturation -100: luma 100 -> 150, chroma 54 -> 24). The camera
+            // only reaches for backend 2 by itself when it has a video filter to compute, which is
+            // why selecting a filter makes the palette show up in the clip. While our dial has been
+            // used on the video page we answer that one key ourselves, so the palette reaches the
+            // file without a filter.
+            //
+            // It has to be this key and not the fast-video one: `om.e0.k` enters a whole block when
+            // is_use_fast_video_recorder is set, and that block reads the speed-mode entries
+            // (fast_video_speed_auto_mode) through a bare Boolean.booleanValue() with no null
+            // check, because the camera only ever sets the flag together with those entries -
+            // forcing it alone crashes on the shutter with
+            // "NullPointerException ... at om.e0.k(RecordProcessor.java:227)". Raising
+            // is_use_media_codec instead only makes the value more defined than it was, and the
+            // backend-2 side effect (`om.l.g1 = true`) reads no further config.
+            //
+            // The switch is held back while the dial sits at a neutral 0/0, through wantPreviewLut:
+            // the app backend costs more power than the native one and is not worth taking over a
+            // clip that carries no change, so the camera keeps its own choice until there is
+            // something to write into the file.
+            try {
+                Object appCodec = XposedHelpers.getStaticObjectField(cls("om.e0$g"), "b");
+                if (appCodec == null || !"is_use_media_codec".contentEquals(
+                        String.valueOf(field(appCodec, "a")))) {
+                    throw new IllegalStateException("recorder key mismatch");
+                }
+                appCodecKey = appCodec;
+                XposedBridge.hookAllMethods(cls("om.c0"), "a", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.args.length != 1 || param.args[0] != appCodecKey) return;
+                        if (!wantPreviewLut()) return;
+                        if (Boolean.TRUE.equals(param.getResult())) return;
+                        param.setResult(Boolean.TRUE);
+                        Log.i(TAG, "recording asked for the app encoder pipeline");
+                    }
+                });
+                Log.i(TAG, "video recorder backend hook installed");
+            } catch (Throwable error) {
+                Log.i(TAG, "video recorder hook skipped " + error);
+            }
+            // Tried and falsified 2026-10-16: answering "func_support_video_basic_tone" so that
+            // BaseMode.H4/.x6 also write the vendor CaptureRequest keys (bb.s.e0 tone, bb.s.d0
+            // saturation) beside the preview key. The hook did fire - the log shows
+            // "answered func_support_video_basic_tone on com.oplus.camera.module.a" - and the
+            // recording still came out untoned (frame chroma 52.5 against a 54.4 baseline while the
+            // dial sat at tone/saturation -100). The video stream does not consume that channel on
+            // this model, so the code is not kept. See port-x8u/README.md 4.19.
             XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     Activity activity = (Activity) param.thisObject;
@@ -265,6 +513,8 @@ public final class MasterPalette {
         switch (name) {
             case "ef.m": return "ff.n";
             case "ef.m$b": return "ff.n$b";
+            case "kc.y": return "lc.w";
+            case "kc.c0": return "lc.b0";
             case "rp.k0": return "tp.k0";
             case "com.oplus.camera.x6": return "com.oplus.camera.w6";
             case "em.p0": return "fm.q0";
@@ -310,11 +560,66 @@ public final class MasterPalette {
         return type == null ? null : XposedHelpers.getStaticObjectField(type, name);
     }
 
+    /** The two modes this entry serves. POP reports "retroCamera"; master reports "professional". */
+    private static final String MODE_MASTER = "professional";
+    private static final String MODE_RETRO = "retroCamera";
+    /** Bottom margin of the POP dial: POP keeps its preview and filter strip, so nothing is lifted. */
+    private static final int RETRO_DIAL_BOTTOM_DP = 16;
     /**
-     * The master presenter: an ef.m instance whose palette object (a yg.a field) is the em.p0 found
-     * through rp.k0 -> com.oplus.camera.x6 -> f0 -> a -> a, and whose i() reports "professional".
+     * Master presenter: an ef.m instance whose palette object (a yg.a field) is the em.p0 found
+     * through rp.k0 -> com.oplus.camera.x6 -> f0 -> a -> a, and whose i() reports {@code mode}.
+     *
+     * <p>Only {@code ef.m} will do. The camera keeps one presenter per mode and they all share the
+     * base class this module hooks, so a mode-string match on its own picks an arbitrary one of
+     * them (POP alone brings up a dozen); the palette callback is {@code ef.m$b} and takes nothing
+     * else, so any other class throws {@code NoSuchMethodError} on the constructor and the whole
+     * open() dies. When no {@code ef.m} is alive - a session that never built the pro feature - the
+     * caller falls back to the LUT manager, which needs no presenter at all.
      */
-    private static Object masterPresenter() {
+    private static Object palettePresenter(String mode) {
+        Object registered = registeredPresenter(mode);
+        return registered != null ? registered : presenterFromContainer(mode);
+    }
+
+    /** True when this is the pro presenter, the only one ef.m$b accepts (and so the only write path). */
+    private static boolean isProPresenter(Object presenter) {
+        Class<?> pro = cls("ef.m");
+        return pro != null && pro.isInstance(presenter);
+    }
+
+    /**
+     * Presenter reached through the effect container's own object graph, for the rare case where the
+     * constructor hook missed the instance. Same restriction: it has to be the pro presenter.
+     */
+    private static Object presenterFromContainer(String mode) {
+        for (int i = containers.size() - 1; i >= 0; i--) {
+            Object container = containers.get(i).get();
+            if (container == null) continue;
+            for (Class<?> c = container.getClass(); c != null; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    Object value;
+                    try {
+                        f.setAccessible(true);
+                        value = f.get(container);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (value == null || value.getClass().getName().startsWith("java.")) continue;
+                    if (!isProPresenter(value)) continue;
+                    if (byType(value, type("yg.a")) == null) continue;
+                    try {
+                        if (mode.equals(call(value, "i"))) return value;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object registeredPresenter(String mode) {
+        Object fallback = null;
         for (int i = containers.size() - 1; i >= 0; i--) {
             Object container = containers.get(i).get();
             if (container == null) {
@@ -326,7 +631,9 @@ public final class MasterPalette {
                 paletteObject = field(field(call(byType(container, type("com.oplus.camera.x6")), "f0"), "a"), "a");
             } catch (Throwable ignored) {
             }
-            if (paletteObject == null || !type("em.p0").equals(paletteObject.getClass().getName())) continue;
+            if (paletteObject != null && !type("em.p0").equals(paletteObject.getClass().getName())) {
+                paletteObject = null;
+            }
             for (int j = presenters.size() - 1; j >= 0; j--) {
                 Object presenter = presenters.get(j).get();
                 if (presenter == null) {
@@ -334,16 +641,108 @@ public final class MasterPalette {
                     continue;
                 }
                 try {
-                    if (byType(presenter, type("yg.a")) == paletteObject
-                        && "professional".equals(call(presenter, "i"))) {
-                        return presenter;
-                    }
+                    if (!isProPresenter(presenter)) continue;
+                    Object palette = byType(presenter, type("yg.a"));
+                    if (palette == null || !mode.equals(call(presenter, "i"))) continue;
+                    if (paletteObject != null && palette == paletteObject) return presenter;
+                    if (fallback == null) fallback = presenter;
                 } catch (Throwable ignored) {
                 }
             }
-            return null;
         }
-        return null;
+        return fallback;
+    }
+
+    /**
+     * Diagnostic: who could carry palette writes in the mode we are in. Lists every presenter we
+     * have seen with its mode string and palette object, then the same for the effect containers.
+     * This is how the POP entry point is found - POP is a different presenter from master's.
+     */
+    private static void dumpModes(String why) {
+        StringBuilder sb = new StringBuilder("MODES ").append(why)
+            .append(" presenters=").append(presenters.size())
+            .append(" containers=").append(containers.size()).append(" | ");
+        int shown = 0;
+        for (int i = presenters.size() - 1; i >= 0 && shown < 12; i--) {
+            Object presenter = presenters.get(i).get();
+            if (presenter == null) continue;
+            shown++;
+            Object palette = byType(presenter, type("yg.a"));
+            sb.append(presenter.getClass().getName()).append(" mode=").append(modeOf(presenter))
+                .append(" pal=").append(palette == null ? "null" : palette.getClass().getName())
+                .append(" | ");
+        }
+        shown = 0;
+        for (int i = containers.size() - 1; i >= 0 && shown < 6; i--) {
+            Object container = containers.get(i).get();
+            if (container == null) continue;
+            shown++;
+            sb.append("container ").append(container.getClass().getName()).append(" pal=");
+            try {
+                sb.append(field(field(call(byType(container, type("com.oplus.camera.x6")), "f0"), "a"), "a"));
+            } catch (Throwable error) {
+                sb.append("n/a");
+            }
+            sb.append(" | ");
+        }
+        for (int i = 0; i < sb.length(); i += 800) {
+            Log.i(TAG, sb.substring(i, Math.min(sb.length(), i + 800)));
+        }
+    }
+
+    /** The presenter's mode string ({@code i()}), or "?" when it cannot be read. */
+    private static String modeOf(Object presenter) {
+        try {
+            return String.valueOf(call(presenter, "i"));
+        } catch (Throwable error) {
+            return "?";
+        }
+    }
+
+    /**
+     * The page the camera is on. Every presenter reports the current mode - that is what made the
+     * pro presenter look like it was serving POP - so the first live one is enough, and it works
+     * with or without a pro presenter. Returns "" when there is nothing to read yet.
+     */
+    private static String currentMode() {
+        for (int i = presenters.size() - 1; i >= 0; i--) {
+            Object presenter = presenters.get(i).get();
+            if (presenter == null) {
+                presenters.remove(i);
+                continue;
+            }
+            String mode = modeOf(presenter);
+            if (!mode.isEmpty() && !"?".equals(mode)) return mode;
+        }
+        return "";
+    }
+
+    /**
+     * The mode of the page a preview renderer belongs to, read off the mode object the renderer
+     * keeps ({@code nn.l.y.a.a}, a BaseMode whose {@code i()} is the mode name - the same call the
+     * camera uses at this very site). It has to come from the renderer rather than from the list of
+     * live presenters: this runs when the GL surface is created, which is before any presenter
+     * exists, and an empty answer would silently skip the mode.
+     */
+    private static String rendererMode(Object renderer) {
+        try {
+            Object mode = field(field(field(renderer, "y"), "a"), "a");
+            Object name = call(mode, "i");
+            return name == null ? "" : String.valueOf(name);
+        } catch (Throwable error) {
+            return "";
+        }
+    }
+
+    /**
+     * Video pages, which the palette is extended to. The camera calls the plain video page
+     * {@code commonVideo}; movie and the other video variants are matched by name so a rename does
+     * not silently drop the mode from the list.
+     */
+    private static boolean isVideoMode(String mode) {
+        if (mode == null) return false;
+        String lower = mode.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("video") || lower.contains("movie");
     }
 
     /** The right-hand menu button of the master UI, used both as anchor and as position source. */
@@ -381,9 +780,288 @@ public final class MasterPalette {
 
     /** Reads a current palette value (P0 tone / O0 saturation) back from the presenter. */
     private static int value(Object presenter, String name) {
+        if (presenter == null) return lutValue(name);
         Object result = stat("com.oplusos.sau.common.utils.a", "h",
             key(name), call(presenter, "M2"), Integer.class, 0);
         return ((Number) result).intValue();
+    }
+
+    // --- the presenter-free path -------------------------------------------------------------
+
+    /**
+     * The palette's own store. {@code Lut3dDataManager} is a plain singleton that keeps tone in
+     * {@code w} and saturation in {@code v} and re-renders the combined LUT from {@code p()}. It is
+     * the same class in both camera builds, and reading it back matches the tone/saturation the
+     * panel reports.
+     */
+    private static Object lut() {
+        Class<?> holder = cls("com.oplus.camera.common.utils.Lut3dDataManager$b");
+        if (holder == null) return null;
+        try {
+            return XposedHelpers.getStaticObjectField(holder, "a");
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    private static int lutValue(String name) {
+        Object manager = lut();
+        if (manager == null) return 0;
+        try {
+            return XposedHelpers.getIntField(manager, "P0".equals(name) ? "w" : "v");
+        } catch (Throwable error) {
+            return 0;
+        }
+    }
+
+    /**
+     * Pushes a palette value without a presenter. This is not a substitute for the write path the
+     * camera uses - it <em>is</em> that write path: {@code ff.n$b.a} handles the two palette keys by
+     * (1) calling {@code Lut3dDataManager.t} / {@code .z} with the value and {@code true} and
+     * (2) notifying the mode object with {@code H4} / {@code x6}. The settings store
+     * ({@code r1.d.K}) is only used for the other keys (filter, soft light), so tone and saturation
+     * need nothing that a presenter holds.
+     *
+     * <p>This matters for POP: on a cold start straight into POP the feature factory never builds
+     * {@code ff.n}, so there is no presenter to write through and the button used to disappear -
+     * switching to master and back only worked because master had built one in the meantime.
+     */
+    private static void writeDirect(String name, int value) {
+        ensureToneEnv();
+        Object manager = lut();
+        if (manager == null) return;
+        forcePaletteFlag();
+        try {
+            XposedHelpers.callMethod(manager, "P0".equals(name) ? "t" : "z", value, true);
+        } catch (Throwable error) {
+            Log.e(TAG, "write " + name + " failed", error);
+        }
+    }
+
+    /**
+     * Brings the basic-tone environment up for the page the palette is on.
+     *
+     * <p>The camera only builds that environment from the preview renderer's surface callback, and
+     * that callback does not run again when the user merely switches to another page, so on the pages
+     * it is not built for the environment stays down and {@code p()} bails out on its very first line
+     * - the written tone/saturation then changes fields and nothing else.
+     */
+    private static void ensureToneEnv() {
+        Object manager = lut();
+        if (manager == null) return;
+        if (toneEnvUp(manager)) return;
+        // Replaying the renderer's own call (nn.l.y0) does not help: the camera answers its own
+        // initialiser by mode, and for the video page it returns without calling e() at all -
+        // measured: "renderer env call returned flag=1 N=false". So the manager's own initialiser is
+        // the only way in. The pair it takes is fixed per page (retroCamera gets 1,0), so try the
+        // small values rather than guessing once.
+        String mode = currentMode();
+        if (mode.isEmpty()) mode = MODE_RETRO;
+        for (int variant : new int[] {2, 1, 0}) {
+            try {
+                XposedHelpers.callMethod(manager, "l", false);
+                Object result = XposedHelpers.callMethod(manager, "e", variant, 1, mode);
+                Log.i(TAG, "tone env init variant=" + variant + " mode=" + mode
+                    + " result=" + result + " " + lutState());
+                if (toneEnvUp(manager)) return;
+            } catch (Throwable error) {
+                Log.i(TAG, "tone env init failed " + error);
+                return;
+            }
+        }
+    }
+
+    /**
+     * The combined 64-cube LUT the manager holds, once the environment is up - the same table the
+     * camera's working pages hand to the preview task. Null while the environment is down, because
+     * the table is only filled by the initialiser.
+     */
+    private static float[] combinedLut() {
+        Object manager = lut();
+        if (manager == null || !toneEnvUp(manager)) return null;
+        try {
+            Object table = XposedHelpers.getObjectField(manager, "c");
+            if (table instanceof float[] && ((float[]) table).length > 0) return (float[]) table;
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Hands the preview the combined LUT the way the camera's own palette pages do.
+     *
+     * <p>The camera builds its preview task (nn.f) with the table as its fourth argument, and on the
+     * pages it keeps the palette off it passes null there instead: measured on the device, the photo
+     * page builds it as "flag1=true lut=786432" while the video page builds it as
+     * "flag1=false lut=null" - same class, same construction site, one empty argument. So the page
+     * computes the palette and then drops it. Building the task ourselves with the manager's table
+     * puts the palette on the viewfinder without touching any camera gate, and only while our dial is
+     * up on such a page.
+     */
+    private static void applyPreviewLut() {
+        if (!wantPreviewLut()) return;
+        Object renderer = rendererRef.get();
+        Object manager = lut();
+        if (renderer == null || manager == null) return;
+        float[] combined = combinedLut();
+        if (combined == null) return;
+        try {
+            Object task = XposedHelpers.newInstance(cls("nn.f"),
+                new Class<?>[] {renderer.getClass(), boolean.class, int.class, float[].class},
+                renderer, Boolean.TRUE, XposedHelpers.getIntField(manager, "t"), combined);
+            Object surface = XposedHelpers.getObjectField(renderer, "c");
+            XposedHelpers.callMethod(surface, "K0", task, false);
+            if (rendererSeen.add("posted")) {
+                Log.i(TAG, "preview handed the combined LUT (" + combined.length + ") "
+                    + "head=" + sample(combined));
+            }
+        } catch (Throwable error) {
+            Log.i(TAG, "preview task re-post failed " + error);
+        }
+    }
+
+    /**
+     * True once the palette has been used on the video page during this visit, and kept for the rest
+     * of the visit rather than only while the dial is on screen. Recording is what forces this: the
+     * camera builds its preview program from the renderer's surface callback, starting a recording
+     * adds a surface, and that rebuild asks for the combined LUT with a null table again - so the
+     * palette was dropped at the exact moment it had to survive, because tapping the shutter is also
+     * what closes our dial. Measured 2026-10-16: dial opened 07:22:12, "closed: camera UI tapped
+     * (shutter_button)" 07:22:15, and the clip came out untoned while the preview had shown it.
+     */
+    private static volatile boolean videoPaletteWanted;
+
+    /**
+     * The first few entries of a table, for the log. Enough to tell an identity table from a graded
+     * one: a real identity starts at 0,0,0, so anything that lifts that first triple is a wash over
+     * the whole picture rather than a palette change.
+     */
+    private static String sample(float[] table) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < Math.min(12, table.length); i++) {
+            if (i > 0) out.append(',');
+            out.append(table[i]);
+        }
+        return out.toString();
+    }
+
+    /**
+     * The page-level half of the condition: the dial has been used on the video page during this
+     * visit and the page is still a video page. It outlives the dial itself, because tapping the
+     * shutter closes the dial and that is exactly the moment the palette has to still be there.
+     */
+    private static boolean videoPaletteLive() {
+        return videoPaletteWanted && isVideoMode(currentMode());
+    }
+
+    /**
+     * Whether the palette is live on the video page <em>and</em> actually doing something. Both the
+     * preview hand-over and the recorder backend answer to this.
+     *
+     * <p>The neutral case is deliberately left out. A dial sitting at 0/0 is the identity table, and
+     * handing it over is not free: this page's tone environment is one we have to bring up ourselves
+     * (the camera never initialises it here), with a parameter pair it never uses - so a table that
+     * is not exactly the identity shows on the viewfinder as a faint wash, and the app-codec recorder
+     * costs more than the native one for a clip that carries no change. Leaving 0/0 alone keeps the
+     * stock picture untouched until there is something to show.
+     */
+    private static boolean wantPreviewLut() {
+        return videoPaletteLive() && paletteEngaged();
+    }
+
+    /** True while tone or saturation is off-centre, read from the LUT manager's own two fields. */
+    private static boolean paletteEngaged() {
+        Object manager = lut();
+        if (manager == null) return true;
+        try {
+            return XposedHelpers.getIntField(manager, "w") != 0
+                || XposedHelpers.getIntField(manager, "v") != 0;
+        } catch (Throwable error) {
+            return true;
+        }
+    }
+
+    private static boolean toneEnvUp(Object manager) {
+        try {
+            return XposedHelpers.getBooleanField(manager, "N");
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
+    /**
+     * True while a presenter-free palette is docked, i.e. the LUT manager is the only write path.
+     * The camera's own mode gate is answered for us while this holds - see {@link #install}.
+     */
+    private static volatile boolean directPaletteOpen;
+
+    /**
+     * {@code Lut3dDataManager.p()} only rebuilds the combined LUT when it is initialised (<b>N</b>),
+     * the mode gate <b>f(P)</b> passes and the palette flag <b>W</b> is up; with W down it just logs
+     * "paletteFlag: false" and leaves the LUT alone, so nothing on screen moves. Master has W raised
+     * by its own mode object when it hands the palette over; a page the factory never built a pro
+     * presenter for has nobody to do it, so we raise it ourselves while our dial is up.
+     */
+    private static void forcePaletteFlag() {
+        Object manager = lut();
+        if (manager == null) return;
+        try {
+            if (!XposedHelpers.getBooleanField(manager, "W")) {
+                XposedHelpers.setBooleanField(manager, "W", true);
+                Log.i(TAG, "raised palette flag (" + lutState() + ")");
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** The three inputs {@code p()} checks, for the log - N initialised, W palette flag, P mode. */
+    private static String lutState() {        Object manager = lut();
+        if (manager == null) return "absent";
+        try {
+            return "N=" + XposedHelpers.getBooleanField(manager, "N")
+                + " W=" + XposedHelpers.getBooleanField(manager, "W")
+                + " P=" + XposedHelpers.getObjectField(manager, "P");
+        } catch (Throwable error) {
+            return "?";
+        }
+    }
+
+    /**
+     * The mode object behind the current page ({@code lc.w.a}), read off the effect container when no
+     * presenter is available. Only used to notify it of a palette change; a failure here is harmless
+     * because the value itself already went into the LUT manager.
+     */
+    private static Object modeObject() {
+        Class<?> iface = cls("yg.a");
+        for (int i = containers.size() - 1; i >= 0; i--) {
+            Object container = containers.get(i).get();
+            if (container == null) continue;
+            try {
+                // The effect container's own mode data is the mode itself - BaseMode implements the
+                // same interface the palette callback talks to.
+                Object mode = byType(container, type("com.oplus.camera.x6"));
+                if (mode != null && iface != null && iface.isInstance(mode)) return mode;
+                Object value = field(field(call(mode, "f0"), "a"), "a");
+                if (value != null && iface != null && iface.isInstance(value)) return value;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** Simple name of whatever {@link #modeObject} found, for the log. */
+    private static String describeClass(Object target) {
+        return target == null ? "none" : target.getClass().getName();
+    }
+
+    /** Notifies the mode object of a palette change; the value itself is already in the manager. */
+    private static void notifyMode(String name, int value) {
+        Object target = modeObject();
+        if (target == null) return;
+        try {
+            XposedHelpers.callMethod(target, "P0".equals(name) ? "H4" : "x6", value);
+        } catch (Throwable ignored) {
+        }
     }
 
     // --- the floating session ----------------------------------------------------------------
@@ -406,6 +1084,8 @@ public final class MasterPalette {
         boolean stopped;
         boolean photoPaletteOpen;
         boolean filterPanelOpen;
+        boolean retroOpen;
+        long lastPopLog;
         String lastTrigger = "";
         String lastError = "";
 
@@ -413,7 +1093,7 @@ public final class MasterPalette {
             this.activity = activity;
             this.decor = (FrameLayout) activity.getWindow().getDecorView();
             this.button = new ImageView(activity);
-            this.button.setContentDescription("大师调色板");
+            this.button.setContentDescription("调色板");
             int icon = activity.getResources().getIdentifier("filter_palette", "drawable", activity.getPackageName());
             if (icon != 0) this.button.setImageResource(icon);
             this.button.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -447,7 +1127,19 @@ public final class MasterPalette {
                         if (!trigger.equals(lastTrigger)) {
                             lastTrigger = trigger;
                             if (!trigger.isEmpty() && !"0".equals(trigger)) {
+                                dumpModes("trigger-" + trigger);
                                 postDump("trigger-" + trigger, true);
+                            }
+                        }
+                        // The retro-camera (POP) page is a different page from master's; record who is
+                        // around the moment it comes up. Calibration only, so it stays behind the
+                        // paldump property like the other snapshots.
+                        boolean retro = findByIds(RETRO_UI_IDS) != null;
+                        if (retro != retroOpen) {
+                            retroOpen = retro;
+                            if (retro && diagnostics) {
+                                dumpModes("retro-ui");
+                                postDump("retro-ui", true);
                             }
                         }
                         boolean photoOpen = findByIds(PHOTO_PALETTE_IDS) != null;
@@ -456,10 +1148,34 @@ public final class MasterPalette {
                             if (photoOpen) postDump("photo-palette");
                         }
                         View anchor = MasterPalette.anchor(activity);
-                        Object presenter = MasterPalette.masterPresenter();
+                        Object presenter = MasterPalette.palettePresenter(
+                            retro ? MODE_RETRO : MODE_MASTER);
+                        View byId = findByIds(ANCHOR_IDS);
+                        if (byId != null) anchor = byId;
+                        if (diagnostics && retro && System.currentTimeMillis() - lastPopLog > 2000) {
+                            lastPopLog = System.currentTimeMillis();
+                            Log.i(TAG, "POPSTATE anchor=" + entryName(anchor)
+                                + " presenter=" + (presenter == null ? "none" : presenter.getClass().getName())
+                                + " lut=" + (lut() != null)
+                                + " focus=" + decor.hasWindowFocus()
+                                + " containers=" + containers.size()
+                                + " presenters=" + presenters.size());
+                        }
                         // Hide the little button while the palette is docked at the bottom.
                         boolean paletteUp = shelf != null;
-                        if (anchor != null && presenter != null && decor.hasWindowFocus() && !paletteUp) {
+                        // Three ways in, and the page decides which. Master has the pro presenter.
+                        // POP and the video pages have none - the video page's pro feature is never
+                        // built - and are served straight out of the LUT manager, since that is where
+                        // tone and saturation live. The video page is recognised by name so plain
+                        // photo, which has its own palette entry, is left alone.
+                        boolean video = isVideoMode(currentMode());
+                        // Leaving the video page ends the hand-over. Nothing has to be undone: the
+                        // camera rebuilds its program for the page it moves to.
+                        if (videoPaletteWanted && !video && !currentMode().isEmpty()) {
+                            videoPaletteWanted = false;
+                        }
+                        boolean canWrite = presenter != null || retro || (video && lut() != null);
+                        if (anchor != null && canWrite && decor.hasWindowFocus() && !paletteUp) {
                             int[] anchorLoc = new int[2];
                             int[] decorLoc = new int[2];
                             anchor.getLocationOnScreen(anchorLoc);
@@ -496,9 +1212,15 @@ public final class MasterPalette {
                             Log.i(TAG, "closed: the camera's filter panel came up");
                             hide();
                         }
-                        // Drop the palette only when the master presenter disappears (left master
-                        // mode). Window focus is not a signal here: the bar is a plain child view.
-                        if (presenter == null && shelf != null) hide();
+                        // Drop the palette only when there is no write path left at all (no presenter
+                        // and no LUT manager). Window focus is not a signal here: the bar is a plain
+                        // child view.
+                        // The camera resets the palette flag whenever it rebuilds the tone
+                        // environment, so hold it up for as long as the dial is docked.
+                        if (directPaletteOpen) forcePaletteFlag();
+                        // Leaving a supported page (switching mode, say) takes the palette down with
+                        // it, and restores whatever the page had moved or hidden.
+                        if (!canWrite && shelf != null) hide();
                     } catch (Throwable error) {
                         if (!error.toString().equals(lastError)) {
                             lastError = error.toString();
@@ -638,6 +1360,10 @@ public final class MasterPalette {
 
         /** Removes the bar/scrim and puts the control bar back where the camera left it. */
         void hide() {
+            directPaletteOpen = false;
+            // The LUT hand-over deliberately does NOT stop here: closing the dial (which tapping the
+            // shutter does) is not the same as giving the palette up, and on the video page the
+            // values stay set until the page is left.
             if (pending != null) {
                 pending.flush();
                 pending = null;
@@ -769,17 +1495,33 @@ public final class MasterPalette {
                 hide();
                 return;
             }
-            Object presenter = masterPresenter();
-            if (presenter == null) return;
+            boolean retro = retroOpen;
+            Object presenter = palettePresenter(retro ? MODE_RETRO : MODE_MASTER);
+            // Master goes through the pro presenter. Without one - POP, and the video pages, whose
+            // pro feature is never built - tone and saturation still work, because they live in the
+            // LUT manager rather than in a presenter.
+            if (presenter == null && !(retro || (isVideoMode(currentMode()) && lut() != null))) {
+                return;
+            }
+            // Only the pro page has room for - and matches - the camera's own lifted arrangement.
+            // Everything else keeps its layout and docks the dial under the shutter instead. POP is
+            // stacked whether or not a pro presenter happens to be alive: its preview card ends at
+            // 1590 with the filter strip filling 1590..1770, so the lift would bury that strip.
+            boolean stacked = retro || presenter == null;
             View panel;
             Object recipe;
             String filter;
             try {
-                Object holder = XposedHelpers.newInstance(cls("ef.m$b"), presenter);
+                // ef.m$b only accepts an ef.m; anything else is a NoSuchMethodError that would abort
+                // the whole open, so the callback is built only for a presenter that really is one.
+                Object holder = presenter == null || !isProPresenter(presenter) ? null
+                    : XposedHelpers.newInstance(cls("ef.m$b"), presenter);
                 panel = (View) XposedHelpers.newInstance(
                     cls("com.oplus.ocs.camera.ipuapi.process.filter.palette.PalettePanelView"), activity);
-                filter = (String) call(byType(presenter, type("yg.a")), "R5",
-                    ((Number) call(presenter, "L2")).intValue());
+                filter = presenter == null ? null
+                    : (String) call(byType(presenter, type("yg.a")), "R5",
+                        ((Number) call(presenter, "L2")).intValue());
+                if (filter == null || filter.isEmpty()) filter = "default";
                 recipe = stat("com.oplus.ocs.camera.ipuapi.process.filter.palette.PaletteColors", "get", filter);
                 if (recipe == null) {
                     recipe = stat("com.oplus.ocs.camera.ipuapi.process.filter.palette.PaletteColors", "get", "default");
@@ -789,50 +1531,68 @@ public final class MasterPalette {
                 int saturation = value(presenter, "O0");
                 call(panel, "setCurrentToneAndSaturation", tone, saturation);
 
-                // Copy the stock arrangement instead of inventing one. Measured with the paldump tree
-                // dump on this device, photo mode - with its own palette open - does exactly this:
-                // lifts the whole control panel by dimen/palette_control_view_translation_4_3 (95dp),
-                // hides the mode strip, the zoom row and the manual-parameter rows, and puts the 96dp
-                // dial at control-panel-top + 351px. Its preview frame never moves (330..1770 in both
-                // states), so "the preview shrinks and lifts" was only ever the hidden rows plus the
-                // lifted panel. The dial therefore needs no background of its own: the area under the
-                // shutter is already black.
+                // Master copies the stock arrangement instead of inventing one. Measured with the
+                // paldump tree dump on this device, photo mode - with its own palette open - does
+                // exactly this: lifts the whole control panel by
+                // dimen/palette_control_view_translation_4_3 (95dp), hides the mode strip, the zoom
+                // row and the manual-parameter rows, and puts the 96dp dial at control-panel-top +
+                // 351px. Its preview frame never moves (330..1770 in both states), so "the preview
+                // shrinks and lifts" was only ever the hidden rows plus the lifted panel.
                 controlBar = findByIds(CANDIDATE_CONTROL_IDS);
-                if (controlBar != null) controlBar.setTranslationY(-dp(PALETTE_PANEL_LIFT_DP));
                 restore();
-                for (String id : PALETTE_HIDE_IDS) {
-                    View view = find(id);
-                    if (view == null || view.getVisibility() != View.VISIBLE) continue;
-                    hidden.put(view, view.getVisibility());
-                    view.setVisibility(View.GONE);
-                }
                 int panelTop = controlBar != null ? screenTop(controlBar)
                     : decor.getHeight() - dp(202);
                 int dialPx = dial();
-                int dialTop = panelTop + dp(PALETTE_DIAL_TOP_DP);
+                int dialTop;
+                if (stacked) {
+                    // No room for the lift on these pages. POP's preview card ends at 1590 with its
+                    // filter strip filling 1590..1770, and the video page's preview runs to 2070 with
+                    // the control panel sitting on top of it, so raising the panel by 95dp would drive
+                    // the shutter (1794-95dp = 1509..1725) straight onto the picture. The dial
+                    // therefore docks in the empty band under the shutter and only the mode strip
+                    // steps aside; the preview and everything else stay where they are.
+                    for (String id : RETRO_HIDE_IDS) {
+                        View view = find(id);
+                        if (view == null || view.getVisibility() != View.VISIBLE) continue;
+                        hidden.put(view, view.getVisibility());
+                        view.setVisibility(View.GONE);
+                    }
+                    dialTop = decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP);
+                } else {
+                    if (controlBar != null) controlBar.setTranslationY(-dp(PALETTE_PANEL_LIFT_DP));
+                    panelTop = controlBar != null ? screenTop(controlBar)
+                        : decor.getHeight() - dp(202);
+                    for (String id : PALETTE_HIDE_IDS) {
+                        View view = find(id);
+                        if (view == null || view.getVisibility() != View.VISIBLE) continue;
+                        hidden.put(view, view.getVisibility());
+                        view.setVisibility(View.GONE);
+                    }
+                    dialTop = panelTop + dp(PALETTE_DIAL_TOP_DP);
 
-                // Round the preview off the same way photo mode does while its palette is up. The
-                // image comes from gl_root_view, which cannot be clipped by an outline, so the card
-                // is painted as a mask: black everywhere outside the inset rounded rectangle.
-                View frame = find("frame_layout");
-                if (frame != null && frame.getWidth() > 0 && frame.getHeight() > 0) {
-                    FrameLayout.LayoutParams maskParams =
-                        new FrameLayout.LayoutParams(frame.getWidth(), frame.getHeight());
-                    maskParams.leftMargin = screenLeft(frame);
-                    maskParams.topMargin = screenTop(frame);
-                    previewMask = new PreviewCardMask(activity,
-                        dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP));
-                    decor.addView(previewMask, maskParams);
-                }
+                    // Round the preview off the same way photo mode does while its palette is up. The
+                    // image comes from gl_root_view, which cannot be clipped by an outline, so the
+                    // card is painted as a mask: black outside the inset rounded rectangle.
+                    View frame = find("frame_layout");
+                    if (frame != null && frame.getWidth() > 0 && frame.getHeight() > 0) {
+                        FrameLayout.LayoutParams maskParams =
+                            new FrameLayout.LayoutParams(frame.getWidth(), frame.getHeight());
+                        maskParams.leftMargin = screenLeft(frame);
+                        maskParams.topMargin = screenTop(frame);
+                        previewMask = new PreviewCardMask(activity,
+                            dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP));
+                        decor.addView(previewMask, maskParams);
+                    }
 
-                // The thumbnail rides with the control panel, which would park it next to the shutter
-                // over the preview. Photo mode puts its 重置 button in the bottom-left corner of the
-                // palette row (1932..2039), so the thumbnail goes there - centred on the dial row.
-                thumb = find("thumbnail");
-                if (thumb != null && thumb.getHeight() > 0) {
-                    thumbBase = thumb.getTranslationY();
-                    thumbShift = (dialTop + dialPx / 2f) - (screenTop(thumb) + thumb.getHeight() / 2f);
-                    thumb.setTranslationY(thumbBase + thumbShift);
+                    // The thumbnail rides with the control panel, which would park it next to the
+                    // shutter over the preview. Photo mode puts its 重置 button in the bottom-left
+                    // corner of the palette row (1932..2039), so the thumbnail goes there.
+                    thumb = find("thumbnail");
+                    if (thumb != null && thumb.getHeight() > 0) {
+                        thumbBase = thumb.getTranslationY();
+                        thumbShift = (dialTop + dialPx / 2f) - (screenTop(thumb) + thumb.getHeight() / 2f);
+                        thumb.setTranslationY(thumbBase + thumbShift);
+                    }
                 }
 
                 FrameLayout.LayoutParams dialParams = new FrameLayout.LayoutParams(
@@ -846,8 +1606,15 @@ public final class MasterPalette {
                 if (readout != null) readout.show(tone, saturation);
 
                 // Anything tapped over the preview closes the palette, as in photo mode. The scrim
-                // stops at the lifted control panel so the shutter keeps working while it is open.
+                // stops above the control panel - and, where there is one, above the retro filter
+                // strip too, so the strip keeps taking its own taps and drags.
                 int scrimBottom = Math.max(dp(80), Math.min(panelTop, decor.getHeight()));
+                if (stacked) {
+                    View strip = find("retro_camera_filter_scrollview");
+                    if (strip != null && strip.getHeight() > 0) {
+                        scrimBottom = Math.max(dp(80), Math.min(scrimBottom, screenTop(strip)));
+                    }
+                }
                 View scrimView = new View(activity);
                 scrimView.setBackgroundColor(0x01000000);
                 scrimView.setClickable(true);
@@ -857,11 +1624,27 @@ public final class MasterPalette {
                 postDump("master-palette");
                 // Two later snapshots: if the user goes on to open the filter page, the state that
                 // broke the drag is captured even when the auto-close above does not fire.
-                decor.postDelayed(() -> dumpTree("master-palette+3s"), 3000);
-                decor.postDelayed(() -> dumpTree("master-palette+6s"), 6000);
+                if (diagnostics) {
+                    decor.postDelayed(() -> dumpTree("master-palette+3s"), 3000);
+                    decor.postDelayed(() -> dumpTree("master-palette+6s"), 6000);
+                }
 
-                Pending pending = new Pending(presenter, holder, panel, readout, tone, saturation);
+                Pending pending = new Pending(presenter, holder, panel, readout,
+                    retro ? MODE_RETRO : MODE_MASTER, tone, saturation);
                 this.pending = pending;
+                // No presenter means the LUT manager is the only write path, so the camera's mode
+                // gate has to be answered for us while the dial is up (see install).
+                directPaletteOpen = holder == null;
+                forcePaletteFlag();
+                if (directPaletteOpen) ensureToneEnv();
+                // On a page the camera keeps the combined LUT away from (the video page) the palette
+                // is computed and then dropped, so the preview has to be handed the table - and it
+                // has to keep being handed over after the dial closes, because the camera rebuilds
+                // its program when recording starts a new surface.
+                if (directPaletteOpen && isVideoMode(currentMode())) {
+                    videoPaletteWanted = true;
+                    applyPreviewLut();
+                }
                 panel.setOnTouchListener((v, event) -> {
                     if (event.getActionMasked() == MotionEvent.ACTION_UP
                         || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
@@ -890,7 +1673,13 @@ public final class MasterPalette {
 
                 StringBuilder ids = new StringBuilder();
                 for (String id : GEOMETRY_IDS) ids.append(geometry(id)).append(' ');
-                Log.i(TAG, "opened filter=" + filter + " tone=" + tone + " saturation=" + saturation
+                Log.i(TAG, "opened page=" + (retro ? "retro" : presenter == null ? "other" : "master")
+                    + " mode=" + currentMode()
+                    + " layout=" + (stacked ? "docked" : "lifted")
+                    + " via=" + (holder != null ? "presenter" : "lut")
+                    + " lut[" + lutState() + "]"
+                    + " modeImpl=" + describeClass(modeObject())
+                    + " filter=" + filter + " tone=" + tone + " saturation=" + saturation
                     + " dial=" + dialPx + " dialTop=" + dialTop + " panelTop=" + panelTop
                     + " scrim=" + scrimBottom + " hidden=" + hidden.size()
                     + " card=" + (previewMask != null) + " thumbShift=" + thumbShift
@@ -968,6 +1757,7 @@ public final class MasterPalette {
         private final Object callback;
         private final View panel;
         private final Readout readout;
+        private final String mode;
         private final Object toneKey = key("P0");
         private final Object saturationKey = key("O0");
         private final Runnable update = this::flush;
@@ -979,11 +1769,13 @@ public final class MasterPalette {
         private int lastLoggedSaturation = Integer.MIN_VALUE;
         private boolean queued;
 
-        Pending(Object presenter, Object callback, View panel, Readout readout, int tone, int saturation) {
+        Pending(Object presenter, Object callback, View panel, Readout readout, String mode,
+                int tone, int saturation) {
             this.presenter = presenter;
             this.callback = callback;
             this.panel = panel;
             this.readout = readout;
+            this.mode = mode;
             this.tone = tone;
             this.appliedTone = tone;
             this.saturation = saturation;
@@ -1002,21 +1794,35 @@ public final class MasterPalette {
         void flush() {
             panel.removeCallbacks(update);
             queued = false;
-            if (masterPresenter() != presenter) return;
+            // Mode left (or the camera rebuilt its presenter): stop pushing values into it. With no
+            // presenter at all (POP built outside the pro feature) the direct route is the only one,
+            // and it stays valid for as long as the palette is on screen.
+            if (presenter != null && palettePresenter(mode) != presenter) return;
             if (readout != null) readout.show(tone, saturation);
             if (tone != appliedTone) {
-                call(callback, "a", tone, toneKey);
+                if (callback != null) call(callback, "a", tone, toneKey);
+                else {
+                    writeDirect("P0", tone);
+                    notifyMode("P0", tone);
+                }
                 appliedTone = tone;
             }
             if (saturation != appliedSaturation) {
-                call(callback, "a", saturation, saturationKey);
+                if (callback != null) call(callback, "a", saturation, saturationKey);
+                else {
+                    writeDirect("O0", saturation);
+                    notifyMode("O0", saturation);
+                }
                 appliedSaturation = saturation;
             }
             if (tone != lastLoggedTone || saturation != lastLoggedSaturation) {
                 lastLoggedTone = tone;
                 lastLoggedSaturation = saturation;
-                Log.i(TAG, "apply tone=" + tone + " saturation=" + saturation);
+                Log.i(TAG, "apply tone=" + tone + " saturation=" + saturation
+                    + " via=" + (callback != null ? "presenter" : "lut"));
             }
+            // The combined LUT changed, so re-hand it to the preview where the camera does not.
+            applyPreviewLut();
         }
     }
 }

@@ -188,6 +188,20 @@ done
 
 bind_merged_dir /odm/etc/camera/meishe_lut "$MODDIR/payload/meishe_lut" "$MERGED_ROOT" meishe_lut /odm/etc/camera/meishe_lut
 
+# [Both profiles] PKJ110's /odm/etc/camera/filters_lut is missing four HLG/HDR colour-conversion
+# tables that the camera asks for by name:
+#   bt709_srgb_to_p3_srgb_3dlut_light.cube      bt709_srgb_to_bt2020_hlg_3dlut_light.cube
+#   p3_srgb_to_bt2020_hlg_3dlut_light.cube      bt2020_hlg_to_p3_srgb_3dlut_light.cube
+# They are not in the C.75 / C.73 / F.21 builds either (37 entries each), so the video page has
+# NEVER initialised its BasicTone environment successfully on this model: the camera requests it,
+# the read fails (FileNotFoundException), and it carries on without. Nothing showed that until the
+# palette was extended to video, because the first thing Lut3dDataManager.p() does is bail out when
+# the environment is down - so the palette was computed and then dropped, and the viewfinder never
+# moved. The four files are from PMA110 (X9U) 17.0.0.106's odm, same shape as the ones already in
+# this directory (17-cube ASCII Adobe .cube). The directory is merged, not replaced: X8U's own
+# 157 entries stay, these four are added, and dropping the bind reverts it.
+bind_merged_dir /odm/etc/camera/filters_lut "$MODDIR/payload/filters_lut" "$MERGED_ROOT" filters_lut /odm/etc/camera/filters_lut
+
 BT_EXTRA=$MERGED_ROOT/basictone_extra
 rm -rf "$BT_EXTRA"
 mkdir -p "$BT_EXTRA/setting_Retro"
@@ -257,6 +271,8 @@ log "polaroid=$(ls -l /odm/etc/camera/meishe_lut/polaroid_sdr.mslut 2>&1)"
 log "host_film=$(ls -l /odm/etc/camera/meishe_lut/fuji-nc.bin 2>&1)"
 log "retro_ini=$(ls -l /odm/etc/camera/basictone/setting_Retro/SimTool_Master.ini 2>&1)"
 log "host_setting=$(ls -d /odm/etc/camera/basictone/setting 2>&1)"
+log "filters_lut_count=$(ls /odm/etc/camera/filters_lut 2>/dev/null | wc -l)"
+log "hlg_luts=$(ls /odm/etc/camera/filters_lut/*hlg*.cube 2>&1 | tr '\n' ' ')"
 
 if [ "$PROFILE" = PMA110 ]; then
     for LENS in main wide tele ultratele; do

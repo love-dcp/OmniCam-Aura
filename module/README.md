@@ -59,6 +59,11 @@ Aura 与 Muse 只能启用其一。
   （`palette/{HDR,SDR}` 共 18 张色卡 + 4 个 `SimTool_*Palette*.ini`：3 个 `SimTool_Palette_Photo_*`
   与 `SimTool_Preview_Palette_Normal`），逐机型的 `lmt/` tone 表保持 X8U 原厂；专业视频 ISZ 补丁
   **跳过**（它逐字节匹配 PMA110 的 `CameraHWConfiguration.config`，且未在 X8U 上验证过）。
+  `payload/filters_lut/` 另外补 **4 张 HLG/HDR 色彩转换表**（`*_3dlut_light.cube`，取自 PMA110
+  17.0.0.106 的 odm）。这 4 个名字 X8U 的 C.75 / C.73 / F.21 三个固件里都没有，所以**视频页的
+  BasicTone 环境在这台机器上从来没能初始化成功**（相机请求、读取失败、然后照常跑）。直到调色盘
+  扩展到视频页才暴露：`p()` 第一行就是"环境没起来就返回"，于是调色算完就被丢掉、取景器不动。
+  目录是 **merge 而不是替换**（X8U 原有 157 项保留，只加这 4 个），去掉 bind 即可回退。
 
 > **注意**：凡是设备相关的后端库都**不能**放进模块的 `system/` 目录。`metamount.sh`
 > 会把 `system/` 下的树无条件叠加到系统分区，脚本没有机会按机型拦截。三个 X9U 后端因此放在

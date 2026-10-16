@@ -70,7 +70,7 @@ PMA110_PAYLOAD = {
     ),
 }
 MODULE_SCRIPTS = {
-    "post-fs-data.sh": (17561, "2d6badf8a370eba9b1c64b0bec982f7f"),
+    "post-fs-data.sh": (18926, "db04b0b5e461c47ad698d64a8c52ff84"),
     "service.sh": (6798, "4a71d4eead6cefba07c3d3f09e1ed74d"),
     "post-mount.sh": (9505, "2512f1bb1acd1fcb8f4c798c932a0e89"),
     # Device-side repair/diagnostics for the POP regression; shipped so the fix can also be
@@ -105,6 +105,20 @@ POSITIVE_LUTS = (
     "positive_hdr_master_a_1.bin",
     "positive_hdr_master_d_1.bin",
 )
+
+# The four HLG/HDR colour-conversion tables the camera asks for by name and PKJ110's
+# /odm/etc/camera/filters_lut does not have. They are missing from the C.75 / C.73 / F.21 builds
+# as well (37 entries each, none of them these), so the video page has never brought its BasicTone
+# environment up on this model: the camera requests it, the read fails, and it continues without -
+# which the palette made visible, because Lut3dDataManager.p() bails out on its first line while
+# the environment is down. Supplied from PMA110 (X9U) 17.0.0.106's odm; 17-cube ASCII Adobe .cube,
+# same shape as the other filters_lut entries. See port-x8u/README.md section 4.18.
+HLG_LUTS = {
+    "bt709_srgb_to_p3_srgb_3dlut_light.cube": (131424, "93d1e7b231446e6c6643b47c49cf414d"),
+    "bt709_srgb_to_bt2020_hlg_3dlut_light.cube": (131250, "7e2cbae1cb821c06d143c8b767404320"),
+    "p3_srgb_to_bt2020_hlg_3dlut_light.cube": (131134, "c9ccb4d87f40e1a7c007b73b611f0d18"),
+    "bt2020_hlg_to_p3_srgb_3dlut_light.cube": (107325, "5c718fa6d64c557011888d21352a7a6f"),
+}
 
 def _module_version():
     with open(os.path.join(REPO, "module", "module.prop"), encoding="utf-8") as handle:
@@ -221,6 +235,20 @@ def check_payloads():
             size_of(path) == POSITIVE_LUT_SIZE and digest(path) == POSITIVE_LUT_MD5,
             "(size=%d md5=%s, want %d/%s)" % (size_of(path), digest(path),
                                               POSITIVE_LUT_SIZE, POSITIVE_LUT_MD5),
+        )
+
+    print("      (HLG/HDR conversion tables the video page needs)")
+    hlg_dir = os.path.join(REPO, "module", "payload", "filters_lut")
+    for name, (want_size, want_md5) in sorted(HLG_LUTS.items()):
+        path = os.path.join(hlg_dir, name)
+        if not os.path.isfile(path):
+            check("exists payload/filters_lut/%s" % name, False)
+            continue
+        check(
+            "hlg LUT %-34s" % name,
+            size_of(path) == want_size and digest(path) == want_md5,
+            "(size=%d md5=%s, want %d/%s)" % (size_of(path), digest(path),
+                                              want_size, want_md5),
         )
 
 
@@ -450,6 +478,13 @@ def check_zip():
                 continue
             check("archive positive LUT %s" % name, bundle_md5(entry) == POSITIVE_LUT_MD5,
                   bundle_md5(entry))
+
+        for name, (_size, want_md5) in sorted(HLG_LUTS.items()):
+            entry = "payload/filters_lut/" + name
+            if entry not in names:
+                check("archive has %s" % entry, False)
+                continue
+            check("archive hlg LUT %s" % name, bundle_md5(entry) == want_md5, bundle_md5(entry))
 
 
 def main(argv):
