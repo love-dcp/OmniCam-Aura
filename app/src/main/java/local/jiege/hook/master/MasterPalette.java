@@ -156,6 +156,13 @@ public final class MasterPalette {
     /** The strip over the preview the GR styles are chosen on. */
     private static final String GR_STYLE_LIST = "gr_filter_recyclerView";
     /**
+     * The camera's GR menu container. It is what tells us the GR panel is on screen, independent of
+     * the panel object, which can outlive the view it was built with.
+     */
+    private static final String GR_MENU_VIEW = "gr_effect_menu_layout";
+    /** The camera's own scale bar inside its GR menu, the one control the palette covers. */
+    private static final String GR_SCALE_BAR = "master_effect_menu_seekbar";
+    /**
      * The camera's style row inside its GR menu - the one a tap on the 风格 entry brings up. It
      * shows the same styles as the strip over the preview, one row above it, so it is concealed for
      * as long as the camera's GR menu is on screen; the strip is the one that stays.
@@ -1116,8 +1123,12 @@ public final class MasterPalette {
         boolean retroOpen;
         boolean grActive;
         boolean grSuppressed;
+        /** The palette was opened from our own button rather than by the camera's GR menu. */
+        boolean grManual;
         /** Log-once counter for the GR style row concealment. */
         int conceals;
+        /** Last logged GR docking state, so only changes are reported. */
+        String grState;
         long lastPopLog;
         String lastTrigger = "";
         String lastError = "";
@@ -1194,8 +1205,9 @@ public final class MasterPalette {
                                 + " containers=" + containers.size()
                                 + " presenters=" + presenters.size());
                         }
-                        // Hide the little button while the palette is docked at the bottom.
-                        boolean paletteUp = shelf != null;
+                        // Hide the little button while the palette is docked - except on the GR
+                        // page when the dial was opened from it, where it is also the way back out.
+                        boolean paletteUp = shelf != null && !(grActive && grManual);
                         // Three ways in, and the page decides which. Master has the pro presenter.
                         // POP and the video pages have none - the video page's pro feature is never
                         // built - and are served straight out of the LUT manager, since that is where
@@ -1406,6 +1418,7 @@ public final class MasterPalette {
             // it again, which is why the take-over stays armed off until the panel is torn down.
             if (grActive) {
                 grActive = false;
+                grManual = false;
                 GrPanel.release();
                 // The camera's GR menu is left where it is (its style list is what our column
                 // clicks through), so the take-over only re-arms once that menu is put away -
@@ -1583,17 +1596,26 @@ public final class MasterPalette {
             // it then leaves the camera half-initialised. By the time this page is up it is ready.
             GrPort.repairStyleIndexOnce();
             View root = GrEffectValues.panelRoot();
-            boolean shown = root != null && root.isShown() && root.getHeight() > 0;
+            // The camera's own GR menu is the ground truth for "the panel is on screen". The panel
+            // object the camera hands us can outlive the view it was built with, and then the
+            // docking waits forever for a root that is never shown again - so the menu view counts
+            // as well, and it is found by id every time.
+            View menu = find(GR_MENU_VIEW);
+            boolean menuUp = menu != null && menu.isShown() && menu.getHeight() > 0;
+            boolean shown = menuUp || (root != null && root.isShown() && root.getHeight() > 0);
+            logGrState(shown, root);
             // The camera's own style row comes up with its GR menu and again on every change of the
             // selected row; it is a second copy of the strip over the preview, so it is kept out of
             // the way for as long as that menu is on screen - with or without the palette.
             if (shown) concealStyleRow();
             if (grActive) {
-                // The palette is docked in the band the lifted control panel freed, so it stays
-                // put; it only goes when the camera puts its own menu away. The take-over is
-                // re-applied here because the camera brings its own rows back on its own terms.
-                if (!shown) closeGr(false);
-                else keepGrHidden();
+                // The palette follows the camera's menu when that is what put it up, and stays put
+                // when the user opened it from the button instead (there is no menu to follow then).
+                if (!shown && !grManual) {
+                    closeGr(false);
+                    return;
+                }
+                if (shown) keepGrHidden();
                 return;
             }
             if (grSuppressed) {
@@ -1601,6 +1623,26 @@ public final class MasterPalette {
                 return;
             }
             if (shown && GrEffectValues.available()) openGrPalette(root);
+        }
+
+        /**
+         * Logs what the GR docking sees, once per change, so a menu that does not bring the palette
+         * up can be told apart from a panel the camera never built.
+         */
+        void logGrState(boolean shown, View root) {
+            View menu = find(GR_MENU_VIEW);
+            String state = (shown ? "menu-up" : "menu-down")
+                + (GrEffectValues.available() ? " bound" : " unbound")
+                + (grActive ? " active" : "") + (grSuppressed ? " suppressed" : "")
+                + (root == null ? " root=null"
+                    : " root=" + idOf(root) + " " + root.getWidth() + "x" + root.getHeight()
+                        + " v=" + root.getVisibility())
+                + (menu == null ? " no-menu-view"
+                    : " menuView=" + menu.getWidth() + "x" + menu.getHeight() + " v="
+                        + menu.getVisibility() + " shown=" + menu.isShown());
+            if (state.equals(grState)) return;
+            grState = state;
+            Log.i(TAG, "gr state: " + state);
         }
 
         /**
@@ -1672,6 +1714,7 @@ public final class MasterPalette {
                 if (controlBar != null) controlBar.setTranslationY(-dp(GR_PANEL_LIFT_DP));
 
                 View strip = find(GR_STYLE_LIST);
+                int stripTop = strip != null && strip.getHeight() > 0 ? screenTop(strip) : 0;
                 int stripBottom = strip != null && strip.getHeight() > 0
                     ? screenTop(strip) + strip.getHeight() : 0;
                 View shutter = find("shutter_button");
@@ -1717,26 +1760,30 @@ public final class MasterPalette {
                     + row.getWidth() + "x" + row.getHeight()));
                 logGrViews();
 
-                // Taps over the picture close the palette, but the strip the styles are chosen on
-                // keeps its own: as with the retro strip, the scrim stops above it. The shutter -
-                // which the camera's own GR menu leaves in reach too - is below that line as well.
-                int scrimBottom = Math.max(dp(80), Math.min(rowTop, decor.getHeight()));
-                int stripTop = strip != null && strip.getHeight() > 0
-                    ? screenTop(strip) : Integer.MAX_VALUE;
-                scrimBottom = Math.max(dp(80), Math.min(scrimBottom, stripTop));
-                View scrimView = new View(activity);
-                scrimView.setBackgroundColor(0x01000000);
-                scrimView.setClickable(true);
-                scrimView.setOnClickListener(v -> closeGr(true));
-                decor.addView(scrimView, new FrameLayout.LayoutParams(-1,
-                    Math.max(dp(1), scrimBottom), Gravity.TOP));
-                scrim = scrimView;
+                // The camera's own menu keeps owning the picture: a tap on it is what closes that
+                // menu, and the palette then follows it down (see grTick). So only the camera's own
+                // scale bar is covered - a tap on the bar moves the parameter of whatever row it
+                // last selected, which is the row one of the dial's axes is driving.
+                View bar = find(GR_SCALE_BAR);
+                int barTop = bar != null && bar.getHeight() > 0 ? screenTop(bar) : 0;
+                int barBottom = bar != null && bar.getHeight() > 0
+                    ? barTop + bar.getHeight() : 0;
+                if (barTop > dp(1) && barBottom > barTop) {
+                    View scrimView = new View(activity);
+                    scrimView.setBackgroundColor(0x01000000);
+                    scrimView.setClickable(true);
+                    FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, barBottom - barTop, Gravity.TOP);
+                    barParams.topMargin = barTop;
+                    decor.addView(scrimView, barParams);
+                    scrim = scrimView;
+                }
 
                 grActive = true;
                 Log.i(TAG, "gr palette up dial=" + dialPx + " row=" + rowTop + "+" + rowHeight
                     + " dialTop=" + dialTop + " strip=" + stripBottom + " stripTop=" + stripTop
                     + " shutter=" + shutterBottom + " lift=" + dp(GR_PANEL_LIFT_DP)
-                    + " bottom=" + bottomLimit + " scrim=" + scrimBottom
+                    + " bottom=" + bottomLimit + " bar=" + barTop + ".." + barBottom
                     + " hidden=" + hidden.size());
             } catch (Throwable error) {
                 Log.e(TAG, "gr palette failed", error);
@@ -1948,9 +1995,19 @@ public final class MasterPalette {
                 return;
             }
             boolean retro = retroOpen;
-            // The GR page's parameters are served by the GR panel over the camera's own style panel,
-            // so the dial stays out of the way there instead of writing master values that do nothing.
-            if (isGrMode(currentMode())) return;
+            // The GR page's parameters live in the camera's own panel rows, which only exist once
+            // that panel has been built - and the camera builds it when its GR menu comes up. From
+            // then on the button opens and closes the dial on this page like it does everywhere
+            // else, so a menu that has been put away is not a dead end.
+            if (isGrMode(currentMode())) {
+                if (!GrEffectValues.available()) {
+                    Log.i(TAG, "GR palette: the camera has not built its GR panel yet");
+                    return;
+                }
+                grManual = true;
+                openGrPalette(null);
+                return;
+            }
             Object presenter = palettePresenter(retro ? MODE_RETRO : MODE_MASTER);
             // Master goes through the pro presenter. Without one - POP, and the video pages, whose
             // pro feature is never built - tone and saturation still work, because they live in the

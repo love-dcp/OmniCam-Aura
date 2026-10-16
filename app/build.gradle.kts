@@ -11,8 +11,8 @@ android {
         applicationId = "local.omnicam.aura"
         minSdk = 28
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.3.8"
+        versionCode = 15
+        versionName = "1.3.9"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }
