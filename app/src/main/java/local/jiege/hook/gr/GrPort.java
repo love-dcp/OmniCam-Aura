@@ -9,9 +9,13 @@ import local.jiege.hook.common.Log;
 public final class GrPort {
     private static final String TAG = "RicohGrPort";
 
+    private static ClassLoader loader;
+    private static boolean styleIndexChecked;
+
     private GrPort() {}
 
     public static void installCamera(ClassLoader classLoader) {
+        loader = classLoader;
         try {
             // The other GR hooks assume the GR mode runs; without it they stay out.
             GrModeHooks.install(classLoader);
@@ -24,6 +28,19 @@ public final class GrPort {
         install("snap focus", () -> GrSnapFocus.install(classLoader));
         install("ratio guard", () -> GrRatioGuard.install(classLoader));
         install("camera watermark", () -> GrCameraWatermark.install(classLoader));
+    }
+
+    /**
+     * Repairs the stored GR style index, once and only once the camera is up. It has to wait: the
+     * store migrates itself out of SharedPreferences while the app starts, and reaching for it
+     * during that leaves the camera stuck half-initialised. The GR page's entry point calls this.
+     */
+    public static void repairStyleIndexOnce() {
+        if (styleIndexChecked) return;
+        styleIndexChecked = true;
+        final ClassLoader classLoader = loader;
+        if (classLoader == null) return;
+        Log.guard(TAG, "style index repair", () -> GrModeHooks.repairStyleIndex(classLoader));
     }
 
     public static void installGallery(ClassLoader classLoader) {

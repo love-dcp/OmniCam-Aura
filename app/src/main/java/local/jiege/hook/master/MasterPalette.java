@@ -18,6 +18,7 @@ import android.widget.TextView;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -30,6 +31,9 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.gr.GrEffectValues;
+import local.jiege.hook.gr.GrPanel;
+import local.jiege.hook.gr.GrPort;
 
 /**
  * Palette entry for master ("professional"), POP ("retroCamera") and video ("commonVideo") on PKJ110.
@@ -140,6 +144,31 @@ public final class MasterPalette {
         "headline_view", "headline_background",
         "oplus_setting_bar",
     };
+    /**
+     * What the GR page gives up for the palette: the mode strip, whose band the palette block
+     * uses, and the camera's own style row, which is a second copy of the strip over the preview.
+     * The style strip itself stays - that is where a style is chosen, and the palette has no style
+     * row of its own.
+     */
+    private static final String[] GR_HIDE_IDS = {
+        "headline_view", "headline_background",
+    };
+    /** The strip over the preview the GR styles are chosen on. */
+    private static final String GR_STYLE_LIST = "gr_filter_recyclerView";
+    /**
+     * The camera's style row inside its GR menu - the one a tap on the 风格 entry brings up. It
+     * shows the same styles as the strip over the preview, one row above it, so it is concealed for
+     * as long as the camera's GR menu is on screen; the strip is the one that stays.
+     */
+    private static final String GR_STYLE_ROW = "gr_filter_select_recyclerView";
+    /**
+     * How far the GR control bar is raised while the palette is up. The block below it needs the
+     * band the shutter row sits in, and the screen draws its navigation line at the bottom edge,
+     * which the dial used to land on.
+     */
+    private static final int GR_PANEL_LIFT_DP = 20;
+    /** Gap left between the bottom of the block and the screen's navigation line. */
+    private static final int GR_BOTTOM_DP = 20;
     /** How far the camera lifts the control panel while its palette is up: dimen/palette_control_view_translation_4_3. */
     private static final int PALETTE_PANEL_LIFT_DP = 95;
     /** Dial top relative to the lifted control panel top (photo mode: 1836 - 1485 = 351px at 3x). */
@@ -1085,6 +1114,10 @@ public final class MasterPalette {
         boolean photoPaletteOpen;
         boolean filterPanelOpen;
         boolean retroOpen;
+        boolean grActive;
+        boolean grSuppressed;
+        /** Log-once counter for the GR style row concealment. */
+        int conceals;
         long lastPopLog;
         String lastTrigger = "";
         String lastError = "";
@@ -1169,12 +1202,19 @@ public final class MasterPalette {
                         // tone and saturation live. The video page is recognised by name so plain
                         // photo, which has its own palette entry, is left alone.
                         boolean video = isVideoMode(currentMode());
+                        // The GR page's parameters live in the camera's own style panel rows, so the
+                        // parameter panel is laid over that panel while it is up rather than opened
+                        // from a second entry point - the rows only exist while it does.
+                        grTick();
                         // Leaving the video page ends the hand-over. Nothing has to be undone: the
                         // camera rebuilds its program for the page it moves to.
                         if (videoPaletteWanted && !video && !currentMode().isEmpty()) {
                             videoPaletteWanted = false;
                         }
-                        boolean canWrite = presenter != null || retro || (video && lut() != null);
+                        // The GR palette stands on the GR rows rather than on a presenter, so the
+                        // take-over itself is the write path there.
+                        boolean canWrite = presenter != null || retro || grActive
+                            || (video && lut() != null);
                         if (anchor != null && canWrite && decor.hasWindowFocus() && !paletteUp) {
                             int[] anchorLoc = new int[2];
                             int[] decorLoc = new int[2];
@@ -1208,7 +1248,7 @@ public final class MasterPalette {
                             filterPanelOpen = filterOpen;
                             if (filterOpen) postDump("filter-panel");
                         }
-                        if (filterOpen && shelf != null) {
+                        if (filterOpen && shelf != null && !grActive) {
                             Log.i(TAG, "closed: the camera's filter panel came up");
                             hide();
                         }
@@ -1361,6 +1401,23 @@ public final class MasterPalette {
         /** Removes the bar/scrim and puts the control bar back where the camera left it. */
         void hide() {
             directPaletteOpen = false;
+            // The GR palette borrows the camera's own panel for its rows: putting it away either
+            // hands that panel back (the user closed the palette) or waits for the camera to build
+            // it again, which is why the take-over stays armed off until the panel is torn down.
+            if (grActive) {
+                grActive = false;
+                GrPanel.release();
+                // The camera's GR menu is left where it is (its style list is what our column
+                // clicks through), so the take-over only re-arms once that menu is put away -
+                // otherwise closing the palette would immediately bring it straight back.
+                grSuppressed = true;
+                for (StackTraceElement frame : new Throwable().getStackTrace()) {
+                    if (frame.getClassName().startsWith("local.jiege.hook.master")) continue;
+                    Log.i(TAG, "gr palette down via " + frame.getClassName() + "."
+                        + frame.getMethodName());
+                    break;
+                }
+            }
             // The LUT hand-over deliberately does NOT stop here: closing the dial (which tapping the
             // shutter does) is not the same as giving the palette up, and on the video page the
             // values stay set until the page is left.
@@ -1446,6 +1503,18 @@ public final class MasterPalette {
             hidden.clear();
         }
 
+        /**
+         * Puts one of the camera's views away, remembering what it was so {@link #hide()} can hand
+         * it back. Called again on every tick while the palette is up: the camera re-lays its GR
+         * rows out when the selected parameter changes and brings them back with it.
+         */
+        void hideView(String id) {
+            View view = find(id);
+            if (view == null || view.getVisibility() == View.GONE) return;
+            if (!hidden.containsKey(view)) hidden.put(view, view.getVisibility());
+            view.setVisibility(View.GONE);
+        }
+
         int screenTop(View view) {
             int[] loc = new int[2];
             int[] decorLoc = new int[2];
@@ -1480,6 +1549,9 @@ public final class MasterPalette {
          * inside our own button or dial are ignored.
          */
         void onForeignClick(View view) {
+            // On the GR page the camera's own panel is both the style selector and the only thing
+            // that owns the rows the GR palette drives, so taps there must not close it.
+            if (grActive) return;
             if (shelf == null || view == null) return;
             for (View node = view; node != null; ) {
                 if (node == shelf || node == button) return;
@@ -1490,12 +1562,395 @@ public final class MasterPalette {
             hide();
         }
 
+        /** Whether the camera is on the Ricoh GR page, whose parameters have their own panel. */
+        static boolean isGrMode(String mode) {
+            return "gr".equals(mode);
+        }
+
+        /**
+         * Keeps the GR palette in step with the camera's own GR style panel. That panel is the only
+         * thing that builds the rows the values live in, so the first time it comes up it is taken
+         * over: hidden, and the palette is docked exactly where photo mode puts its own.
+         */
+        void grTick() {
+            if (!isGrMode(currentMode())) {
+                if (grActive) closeGr(false);
+                grSuppressed = false;
+                return;
+            }
+            // The stored style index is repaired here rather than while the app installs: the
+            // settings store migrates itself out of SharedPreferences during startup, and touching
+            // it then leaves the camera half-initialised. By the time this page is up it is ready.
+            GrPort.repairStyleIndexOnce();
+            View root = GrEffectValues.panelRoot();
+            boolean shown = root != null && root.isShown() && root.getHeight() > 0;
+            // The camera's own style row comes up with its GR menu and again on every change of the
+            // selected row; it is a second copy of the strip over the preview, so it is kept out of
+            // the way for as long as that menu is on screen - with or without the palette.
+            if (shown) concealStyleRow();
+            if (grActive) {
+                // The palette is docked in the band the lifted control panel freed, so it stays
+                // put; it only goes when the camera puts its own menu away. The take-over is
+                // re-applied here because the camera brings its own rows back on its own terms.
+                if (!shown) closeGr(false);
+                else keepGrHidden();
+                return;
+            }
+            if (grSuppressed) {
+                if (!shown) grSuppressed = false;
+                return;
+            }
+            if (shown && GrEffectValues.available()) openGrPalette(root);
+        }
+
+        /**
+         * Re-applies the GR take-over while the palette is up: the mode strip is what the block
+         * needs out of the way, and the camera lays its own views out again on its own terms.
+         */
+        void keepGrHidden() {
+            for (String id : GR_HIDE_IDS) hideView(id);
+        }
+
+        /**
+         * Conceals the camera's own style row - the second row of style icons inside its GR menu.
+         * Concealed rather than hidden: a RecyclerView taken out with GONE is laid out again from
+         * scratch and loses the children the camera keeps its own state in. Deliberately not part
+         * of the hidden map: the row belongs to the camera's menu, which puts it away by itself,
+         * and this is re-applied on every tick while that menu is up.
+         */
+        void concealStyleRow() {
+            View row = find(GR_STYLE_ROW);
+            if (row == null || row.getVisibility() != View.VISIBLE) return;
+            row.setVisibility(View.INVISIBLE);
+            if (conceals++ < 3) Log.i(TAG, "gr style row concealed (camera menu up)");
+        }
+
+        /**
+         * Diagnostic aid for the GR page: every view the GR menu is built from, with where it ended
+         * up, so a strip that is not where it is expected can be told apart from one that is.
+         */
+        void logGrViews() {
+            List<View> all = new ArrayList<>();
+            collectAll(decor, all, 0);
+            StringBuilder line = new StringBuilder("GR views:");
+            for (View view : all) {
+                String name = idOf(view);
+                if (!name.startsWith("gr") && !name.contains("filter")
+                    && !name.contains("soft_light")) {
+                    continue;
+                }
+                line.append(' ').append(name).append('[').append(view.getWidth()).append('x')
+                    .append(view.getHeight()).append(" v=").append(view.getVisibility())
+                    .append(" ty=").append(Math.round(view.getTranslationY()))
+                    .append(" y=").append(screenTop(view)).append(']');
+            }
+            Log.i(TAG, line.toString());
+        }
+
+        void collectAll(View view, List<View> out, int depth) {
+            out.add(view);
+            if (depth > 20 || !(view instanceof ViewGroup)) return;
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectAll(group.getChildAt(i), out, depth + 1);
+            }
+        }
+
+        /**
+         * Docks the GR palette under the camera's own GR UI. Its style strip is where a style is
+         * chosen, so it stays exactly where it is; the block is laid out below both it and the
+         * shutter, and the shutter row is raised first so that band reaches the bottom edge of the
+         * screen without the dial landing on the navigation line.
+         */
+        void openGrPalette(View cameraRoot) {
+            try {
+                controlBar = findByIds(CANDIDATE_CONTROL_IDS);
+                if (controlBar != null) controlBar.setTranslationY(0f);
+                restore();
+                for (String id : GR_HIDE_IDS) hideView(id);
+                concealStyleRow();
+                if (controlBar != null) controlBar.setTranslationY(-dp(GR_PANEL_LIFT_DP));
+
+                View strip = find(GR_STYLE_LIST);
+                int stripBottom = strip != null && strip.getHeight() > 0
+                    ? screenTop(strip) + strip.getHeight() : 0;
+                View shutter = find("shutter_button");
+                int shutterBottom = shutter != null && shutter.getHeight() > 0
+                    ? screenTop(shutter) + shutter.getHeight() : 0;
+                int rowTop = Math.max(stripBottom, shutterBottom) + dp(8);
+                int rowsPx = GrPanel.height(activity, 0);
+                int room = decor.getHeight() - dp(GR_BOTTOM_DP) - rowTop - rowsPx;
+                int dialPx = Math.max(dp(56),
+                    Math.min(Math.round(dial() * 0.66f), room));
+                int rowHeight = rowsPx + dialPx;
+                int bottomLimit = decor.getHeight() - dp(GR_BOTTOM_DP);
+                if (rowTop + rowHeight > bottomLimit) {
+                    rowTop = Math.max(dp(8), bottomLimit - rowHeight);
+                }
+                int dialTop = rowTop + rowsPx;
+
+                View row = GrPanel.build(activity, dialPx, grStyles());
+                if (row == null) return;
+
+                View frame = find("frame_layout");
+                if (frame != null && frame.getWidth() > 0 && frame.getHeight() > 0) {
+                    FrameLayout.LayoutParams maskParams =
+                        new FrameLayout.LayoutParams(frame.getWidth(), frame.getHeight());
+                    maskParams.leftMargin = screenLeft(frame);
+                    maskParams.topMargin = screenTop(frame);
+                    previewMask = new PreviewCardMask(activity,
+                        dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP));
+                    decor.addView(previewMask, maskParams);
+                }
+                // The thumbnail is the camera's, and with nothing lifted it stays in its own corner.
+                thumb = null;
+
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, rowHeight, Gravity.TOP);
+                params.leftMargin = dp(8);
+                params.rightMargin = dp(8);
+                params.topMargin = rowTop;
+                decor.addView(row, params);
+                shelf = row;
+                decor.bringChildToFront(row);
+                row.post(() -> Log.i(TAG, "gr row at " + screenTop(row) + " "
+                    + row.getWidth() + "x" + row.getHeight()));
+                logGrViews();
+
+                // Taps over the picture close the palette, but the strip the styles are chosen on
+                // keeps its own: as with the retro strip, the scrim stops above it. The shutter -
+                // which the camera's own GR menu leaves in reach too - is below that line as well.
+                int scrimBottom = Math.max(dp(80), Math.min(rowTop, decor.getHeight()));
+                int stripTop = strip != null && strip.getHeight() > 0
+                    ? screenTop(strip) : Integer.MAX_VALUE;
+                scrimBottom = Math.max(dp(80), Math.min(scrimBottom, stripTop));
+                View scrimView = new View(activity);
+                scrimView.setBackgroundColor(0x01000000);
+                scrimView.setClickable(true);
+                scrimView.setOnClickListener(v -> closeGr(true));
+                decor.addView(scrimView, new FrameLayout.LayoutParams(-1,
+                    Math.max(dp(1), scrimBottom), Gravity.TOP));
+                scrim = scrimView;
+
+                grActive = true;
+                Log.i(TAG, "gr palette up dial=" + dialPx + " row=" + rowTop + "+" + rowHeight
+                    + " dialTop=" + dialTop + " strip=" + stripBottom + " stripTop=" + stripTop
+                    + " shutter=" + shutterBottom + " lift=" + dp(GR_PANEL_LIFT_DP)
+                    + " bottom=" + bottomLimit + " scrim=" + scrimBottom
+                    + " hidden=" + hidden.size());
+            } catch (Throwable error) {
+                Log.e(TAG, "gr palette failed", error);
+                closeGr(false);
+            }
+        }
+
+        /** The camera's GR styles, read off its strip so the palette can carry them instead. */
+        GrPanel.Styles grStyles() {
+            View list = find(GR_STYLE_LIST);
+            if (!(list instanceof ViewGroup)) {
+                Log.i(TAG, "no GR style strip: the column carries parameters only");
+                return null;
+            }
+            ViewGroup group = (ViewGroup) list;
+            final List<View> chips = new ArrayList<>();
+            final List<String> labels = new ArrayList<>();
+            int current = -1;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View chip = group.getChildAt(i);
+                String label = textOf(chip);
+                if (label == null || label.isEmpty()) continue;
+                chips.add(chip);
+                labels.add(label);
+                if (chip.isSelected() || chip.isActivated()) current = chips.size() - 1;
+            }
+            Log.i(TAG, "GR styles: " + labels + " current=" + current);
+            if (chips.isEmpty()) return null;
+            final int now = current;
+            final StyleCall call = styleCall(group);
+            return new GrPanel.Styles() {
+                @Override public List<String> labels() {
+                    return labels;
+                }
+
+                @Override public int current() {
+                    return now;
+                }
+
+                @Override public void select(int index) {
+                    if (index < 0 || index >= labels.size()) return;
+                    // Preferred: the camera's own "this style was chosen" callback, which is where a
+                    // tap on the strip ends up. It takes the row index and nothing else, so it does
+                    // not care that the strip is hidden and its rows no longer know their positions.
+                    if (call != null && call.invoke(index)) {
+                        Log.i(TAG, "style -> " + index + " (" + labels.get(index) + ") via "
+                            + call.name());
+                        return;
+                    }
+                    // Fallback: a real click, but only on a row that still knows where it sits -
+                    // clicking one that does not hands the camera -1 and walks off its style table.
+                    View list = find(GR_STYLE_LIST);
+                    if (!(list instanceof ViewGroup)) return;
+                    ViewGroup group = (ViewGroup) list;
+                    if (index >= group.getChildCount()) {
+                        Log.i(TAG, "style " + index + " is not in the strip ("
+                            + group.getChildCount() + " rows)");
+                        return;
+                    }
+                    View chip = group.getChildAt(index);
+                    if (!addressable(group, chip)) {
+                        Log.i(TAG, "style " + index + " has no adapter position; left alone");
+                        return;
+                    }
+                    Log.i(TAG, "style -> " + index + " (" + textOf(chip) + ") clicked="
+                        + chip.performClick());
+                }
+
+                @Override public Object recipe(int index) {
+                    if (index < 0 || index >= labels.size()) return grRecipe(null);
+                    return grRecipe(labels.get(index));
+                }
+            };
+        }
+
+        /** The camera's style callback, ready to be called with a row index. */
+        private final class StyleCall {
+            private final Object target;
+            private final Method method;
+
+            StyleCall(Object target, Method method) {
+                this.target = target;
+                this.method = method;
+            }
+
+            String name() {
+                return target.getClass().getSimpleName() + "." + method.getName();
+            }
+
+            boolean invoke(int index) {
+                try {
+                    method.invoke(target, index);
+                    return true;
+                } catch (Throwable error) {
+                    Log.i(TAG, "style callback failed: " + error);
+                    return false;
+                }
+            }
+        }
+
+        /**
+         * Finds the callback the camera installs on its style list: the adapter keeps a listener
+         * whose type declares a single-int method, and that is what a choice on the strip calls.
+         */
+        StyleCall styleCall(ViewGroup list) {
+            try {
+                Object adapter = XposedHelpers.callMethod(list, "getAdapter");
+                if (adapter == null) return null;
+                for (Class<?> type = adapter.getClass(); type != null; type = type.getSuperclass()) {
+                    for (Field field : type.getDeclaredFields()) {
+                        if (Modifier.isStatic(field.getModifiers())) continue;
+                        Method method = intMethod(field.getType());
+                        if (method == null) continue;
+                        field.setAccessible(true);
+                        Object target = field.get(adapter);
+                        if (target == null) continue;
+                        Log.i(TAG, "style callback " + field.getName() + " = "
+                            + target.getClass().getName() + "." + method.getName());
+                        return new StyleCall(target, method);
+                    }
+                }
+            } catch (Throwable error) {
+                Log.i(TAG, "style callback lookup skipped: " + error);
+            }
+            return null;
+        }
+
+        /** A type's own single-int, void-returning method, when it has exactly one of them. */
+        Method intMethod(Class<?> type) {
+            Method found = null;
+            for (Method method : type.getDeclaredMethods()) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1 || params[0] != int.class
+                    || method.getReturnType() != void.class) {
+                    continue;
+                }
+                if (found != null) return null;
+                found = method;
+            }
+            return found;
+        }
+
+        /**
+         * Whether a row of the camera's strip still knows where it sits in the list. Clicking one
+         * whose adapter position is unknown hands the camera -1, so it is left alone instead.
+         */
+        boolean addressable(ViewGroup group, View chip) {
+            try {
+                Object holder = XposedHelpers.callMethod(group, "getChildViewHolder", chip);
+                Object position = holder == null ? null
+                    : XposedHelpers.callMethod(holder, "getAbsoluteAdapterPosition");
+                return position instanceof Integer && ((Integer) position) >= 0;
+            } catch (Throwable error) {
+                Log.i(TAG, "adapter position check skipped: " + error);
+                return true;
+            }
+        }
+
+        /** The first non-empty text under a view, which is how the style chips are labelled. */
+        String textOf(View view) {
+            if (view instanceof TextView) {
+                CharSequence text = ((TextView) view).getText();
+                if (text != null && text.length() > 0) return text.toString();
+            }
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    String text = textOf(group.getChildAt(i));
+                    if (text != null && !text.isEmpty()) return text;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * The dial's colour recipe for a GR style. The camera keys these by filter name, so the
+         * style's own label is tried first and the neutral default is the fallback.
+         */
+        Object grRecipe(String style) {
+            try {
+                String key = style == null ? "default" : style.trim().toLowerCase();
+                boolean known = !key.isEmpty() && (Boolean) stat(
+                    "com.oplus.ocs.camera.ipuapi.process.filter.palette.PaletteColors",
+                    "hasPalette", key);
+                Object recipe = known ? stat(
+                    "com.oplus.ocs.camera.ipuapi.process.filter.palette.PaletteColors",
+                    "get", key) : null;
+                if (recipe == null) {
+                    recipe = stat("com.oplus.ocs.camera.ipuapi.process.filter.palette.PaletteColors",
+                        "get", "default");
+                }
+                Log.i(TAG, "gr palette recipe style=" + style + " key=" + key + " known=" + known
+                    + " present=" + (recipe != null));
+                return recipe;
+            } catch (Throwable error) {
+                Log.i(TAG, "gr palette recipe failed: " + error);
+                return null;
+            }
+        }
+
+        void closeGr(boolean fromUser) {
+            if (!grActive) return;
+            hide();
+        }
+
         void open() {
             if (shelf != null) {
                 hide();
                 return;
             }
             boolean retro = retroOpen;
+            // The GR page's parameters are served by the GR panel over the camera's own style panel,
+            // so the dial stays out of the way there instead of writing master values that do nothing.
+            if (isGrMode(currentMode())) return;
             Object presenter = palettePresenter(retro ? MODE_RETRO : MODE_MASTER);
             // Master goes through the pro presenter. Without one - POP, and the video pages, whose
             // pro feature is never built - tone and saturation still work, because they live in the

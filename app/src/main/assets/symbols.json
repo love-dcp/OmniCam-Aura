@@ -275,6 +275,11 @@
    "params": [],
    "ret": "@GrEffect"
   },
+  "GrStylePanel.rows": {
+   "kind": "field",
+   "in": "@GrStylePanel",
+   "type": "java.util.ArrayList"
+  },
   "GrEffect": {
    "kind": "class",
    "paramOf": [
@@ -1271,6 +1276,16 @@
    "kind": "class",
    "clinitStrings": [
     "key_master_mode_current_preset_index"
+   ],
+   "staticFieldTypes": [
+    "com.oplus.camera.data.DataKey"
+   ],
+   "multi": true
+  },
+  "Keys.grStyleIndex": {
+   "kind": "class",
+   "clinitStrings": [
+    "key_gr_mode_effect_current_select_index"
    ],
    "staticFieldTypes": [
     "com.oplus.camera.data.DataKey"
