@@ -1,12 +1,13 @@
-# OmniCam Aura 1.3.5
+# OmniCam Aura 1.3.7
 
-无界面相机模块。1.3.5 把**调色盘在 PKJ110 上真正做完**：预览与成片两侧都生效。
+无界面相机模块。1.3.7 把**调色盘从照片 / 大师页扩展到 POP（`retroCamera`）与视频（`commonVideo`）页**，
+并让**录制的成片也带上调色** —— 取景器与成片两侧都生效。
 
-事情分两步。1.3.4 修好了**预览**侧（缺的 `[PaletteSCLut]` ini），但同一份操作里按快门成片
-**不带色**。1.3.5 查明原因：预览和成片在 X8U 上用的是**两个完全不同的库** —— 预览走相机 APK
-自带的 `libCombineLut.so`，成片走 ODM 的 `libBasicTonePhoto.so`，而后者**一个 palette 字串都没有**。
-补法是把 X9U 的那个后端按原厂文件名 bind 上去；同时修掉一个被这次换库顶出来的 native hook 缺陷
-（重复 hook 导致 `pc=0` 崩溃），并把调色盘开关正式下发给 PKJ110。
+照片 / 大师页那一套是现成的：调色盘打开时，影调与饱和度只写进 `Lut3dDataManager` 单例的两个字段，
+再由相机自己的预览渲染任务把合并 LUT 上传。POP 与视频页缺的正是这套前提 —— 两页都不构造那个预览
+presenter（`ff.n` 全 App 只在 professional 路径 new 过一次），视频页的相机更是不初始化 BasicTone
+环境、也不给预览任务传 LUT，于是调色被算出来又丢掉。1.3.7 绕开 presenter 直写单例，替相机把视频页
+的环境与 LUT 补齐，最后再解决成片那一段：录制有**两条后端**，只有其中一条会把 App 侧的画面写进文件。
 
 ## 前置条件：KernelSU 需要一个元模块
 
@@ -23,7 +24,63 @@ X9U 的 8 KB router stub 要 `dlopen` 的固定路径，而 X9U 原厂并没有�
 清工作区 `/mnt/vendor/mountify/odm/lib64`，改名或换元模块会让这一步静默失配。
 同一时刻只能有一个元模块生效。完整取证见 `port-x8u/README.md` §4.15。
 
-## 本次变更（1.3.5 · 成片侧调色盘 + 修掉换库顶出来的 GR hook 崩溃）
+## 本次变更（1.3.7 · POP 与视频页调色盘 + 视频成片带调色）
+
+### 一、调色盘停靠 POP 与视频页
+
+- POP 与视频页都没有 professional 那一套预览 presenter（`ff.n` 全 App 只有一处 new），所以调色盘
+  不走 presenter 通道，改为**按类匹配后直写** `Lut3dDataManager`：影调走 `t(v, true)`、饱和度走
+  `z(v, true)`。两者都只落在这两个单例字段上，不需要任何 presenter 参与，也不依赖页面上有没有 `ff.n`。
+- 停靠方式按各页自己的空间来定：POP 只藏模式条（预览卡与复古滤镜条本身就是这一页），盘停在快门
+  下方；视频页同样只藏模式条，`frame_layout` 与控制条之间没有可上移的余量。大师页维持原有的
+  "控制条上移 95dp + 圆角卡片 + 隐藏模式条 / 变焦行 / 参数行"。
+
+### 二、视频页的取景器
+
+三处缺口，逐个补齐：
+
+- **环境**：相机在视频页**从不初始化** BasicTone 环境（它自己的 `Lut3dDataManager.e` 不会被调用），
+  所以环境由模块直接建立，模式名用 `commonVideo`。
+- **LUT 传递**：视频页的预览渲染任务在构造时拿到的 `lut` 是 `null`（照片页是 786432 长度的表），
+  调色因此被丢弃。模块在任务构造时把它换成当前合并 LUT —— 与其它页面拿到的是同一个对象。
+- **数据**：视频页要用的 4 张 HLG 色彩转换表（`bt709_srgb_to_bt2020_hlg` 一类）只在 X9U 固件里，
+  X8U 原厂 `filters_lut` 没有。模块新增 `payload/filters_lut/` 并纳入 `post-fs-data.sh` 的合并目录，
+  开机随 `filters_lut` 一起 bind 到 `/odm/etc/camera/filters_lut`。
+
+### 三、视频成片带调色
+
+- 录制后端由 `om.e0`（RecordProcessor）在 `om.c0.a(om.z)` 给出的配置上二选一：
+  `is_use_media_codec` 为真走 **App 编码器**（`mRecorderType 2`、`mbUseCameraMediaCodec: true`），
+  否则走 **native 后端**（`mRecorderType 1`，MediaCodec 配置里带
+  `vendor.qti-ext-enc-info-native_recording = 1`，输入面由 HAL 直接喂）。native 后端不经过 App 的
+  预览管线，任何 App 侧 LUT 都进不了文件；相机自己只在有视频滤镜要算的时候才会去开 App 后端。
+- 模块在 `om.c0.a(om.z)` 上只回答**这一个键**：视频页用过调色盘、且影调 / 饱和度非零时答 true，
+  其余录制配置原样不动，其它页面不受影响。盘停在 0/0 时是一次恒等变换，不值得为它换成更费电的
+  App 管线，所以那时保持相机自己的选择。
+
+### 四、顶部读数取代顶栏
+
+- 影调 / 饱和度读数原先直接叠在顶栏上，与闪光灯、声音对焦一类图标重叠。相机自己在调色盘打开时
+  是**隐藏整条 `oplus_setting_bar`**，读数正落在它腾出的位置。现按同样做法把顶栏加入两个隐藏表
+  （大师一个、POP 与视频页共用一个），关盘即按原可见性还原。
+
+### 五、发布闸门
+
+- `tools/verify_port_artifacts.py` 新增 4 张 HLG 表的定值与两处校验，并同步 `post-fs-data.sh` 的
+  新定值（18,926 B / `db04b0b5e461c47ad698d64a8c52ff84`）。`python tools/verify_port_artifacts.py`
+  与 `python tools/verify_aura.py` 均 PASS。
+- 实机验证（PKJ110，相机 7.006.123）：POP 与视频页的取景器都随盘变色；**不选滤镜**直接录制时成片
+  同样带调色，1080p 与 4K60fps 档位均正常出片。
+
+## 历史（1.3.5 · 成片侧调色盘 + 修掉换库顶出来的 GR hook 崩溃）
+
+无界面相机模块。1.3.5 把**调色盘在 PKJ110 上真正做完**：预览与成片两侧都生效。
+
+事情分两步。1.3.4 修好了**预览**侧（缺的 `[PaletteSCLut]` ini），但同一份操作里按快门成片
+**不带色**。1.3.5 查明原因：预览和成片在 X8U 上用的是**两个完全不同的库** —— 预览走相机 APK
+自带的 `libCombineLut.so`，成片走 ODM 的 `libBasicTonePhoto.so`，而后者**一个 palette 字串都没有**。
+补法是把 X9U 的那个后端按原厂文件名 bind 上去；同时修掉一个被这次换库顶出来的 native hook 缺陷
+（重复 hook 导致 `pc=0` 崩溃），并把调色盘开关正式下发给 PKJ110。
 
 > 承接 1.3.4：那一版让**预览**里的调色盘活了，但成片仍然不变色。本节是成片侧的收口，
 > 完整推理与取证见 `port-x8u/README.md` §4.14。
